@@ -39,8 +39,10 @@ option(ENABLE_FAAC "Enable FAAC" OFF)
 option(ENABLE_FFMPEG "Enable FFmpeg" OFF)
 option(ENABLE_HLS "Enable HLS" ON)
 option(ENABLE_JEMALLOC_STATIC "Enable static linking to the jemalloc library" OFF)
+option(ENABLE_JEMALLOC_DUMP "Enable jemalloc to dump malloc statistics" OFF)
 option(ENABLE_MEM_DEBUG "Enable Memory Debug" OFF)
 option(ENABLE_MP4 "Enable MP4" ON)
+option(ENABLE_HLS_FMP4 "Enable HLS-FMP4" ON)
 option(ENABLE_MSVC_MT "Enable MSVC Mt/Mtd lib" ON)
 option(ENABLE_MYSQL "Enable MySQL" OFF)
 option(ENABLE_OPENSSL "Enable OpenSSL" ON)
@@ -50,10 +52,11 @@ option(ENABLE_SERVER "Enable Server" ON)
 option(ENABLE_SERVER_LIB "Enable server as android static library" OFF)
 option(ENABLE_SRT "Enable SRT" ON)
 option(ENABLE_TESTS "Enable Tests" ON)
+option(ENABLE_SCTP "Enable SCTP" ON)
 option(ENABLE_WEBRTC "Enable WebRTC" ON)
 option(ENABLE_X264 "Enable x264" OFF)
-option(ENABLE_WEPOLL "Enable wepoll" OFF)
-
+option(ENABLE_WEPOLL "Enable wepoll" ON)
+option(DISABLE_REPORT "Disable report to report.zlmediakit.com" off)
 option(USE_SOLUTION_FOLDERS "Enable solution dir supported" ON)
 
 ##############################################################################
@@ -97,11 +100,12 @@ set(LIBRARY_OUTPUT_PATH    ${OUTPUT_DIR})
 set(EXECUTABLE_OUTPUT_PATH ${OUTPUT_DIR})
 
 # 添加 git 版本信息
-set(COMMIT_HASH "Git_NotFound_Unkown_commit")
-set(BRANCH_NAME "Git_NotFound_Unkown_branch")
+set(COMMIT_HASH "Git_Unkown_commit")
+set(COMMIT_TIME "Git_Unkown_time")
+set(BRANCH_NAME "Git_Unkown_branch")
 set(BUILD_TIME "")
 
-string(TIMESTAMP BUILD_TIME "%Y-%m-%d %H:%M:%S")
+string(TIMESTAMP BUILD_TIME "%Y-%m-%dT%H:%M:%S")
 
 find_package(Git QUIET)
 if(GIT_FOUND)
@@ -117,6 +121,13 @@ if(GIT_FOUND)
     OUTPUT_STRIP_TRAILING_WHITESPACE
     ERROR_QUIET
     WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
+
+  execute_process(
+    COMMAND ${GIT_EXECUTABLE} log --format=format:%aI -1
+    OUTPUT_VARIABLE COMMIT_TIME
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+    ERROR_QUIET
+    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
 endif()
 
 configure_file(
@@ -124,7 +135,7 @@ configure_file(
   ${CMAKE_CURRENT_BINARY_DIR}/version.h
   @ONLY)
 
-message(STATUS "Git version is ${BRANCH_NAME}:${COMMIT_HASH}:${BUILD_TIME}")
+message(STATUS "Git version is ${BRANCH_NAME} ${COMMIT_HASH}/${COMMIT_TIME} ${BUILD_TIME}")
 
 ##############################################################################
 
@@ -172,12 +183,12 @@ if(UNIX)
     "-Wno-unused-function;-Wno-unused-parameter;-Wno-unused-variable"
     "-Wno-error=extra;-Wno-error=missing-field-initializers;-Wno-error=type-limits")
 elseif(WIN32)
-  set(COMPILE_OPTIONS_DEFAULT
-    # TODO: /wd4819 应该是不会生效
-    "/wd4566;/wd4819"
-    # warning C4530: C++ exception handler used, but unwind semantics are not enabled.
-    "/EHsc")
   if (MSVC)
+    set(COMPILE_OPTIONS_DEFAULT
+            # TODO: /wd4819 应该是不会生效
+            "/wd4566;/wd4819"
+            # warning C4530: C++ exception handler used, but unwind semantics are not enabled.
+            "/EHsc")
     # disable Windows logo
     list(APPEND COMPILE_OPTIONS_DEFAULT "/nologo")
     list(APPEND CMAKE_STATIC_LINKER_FLAGS "/nologo")
@@ -191,8 +202,12 @@ if(CMAKE_HOST_SYSTEM_NAME STREQUAL "Darwin")
 endif()
 
 # mediakit 以及各个 runtime 依赖
-update_cached_list(MK_LINK_LIBRARIES "")
-update_cached_list(MK_COMPILE_DEFINITIONS ENABLE_VERSION)
+update_cached(MK_LINK_LIBRARIES "")
+update_cached(MK_COMPILE_DEFINITIONS ENABLE_VERSION)
+
+if (DISABLE_REPORT)
+  update_cached_list(MK_COMPILE_DEFINITIONS DISABLE_REPORT)
+endif ()
 
 if(CMAKE_SYSTEM_NAME MATCHES "Linux")
   include(CheckCXXSourceCompiles)
@@ -321,7 +336,11 @@ if(ENABLE_JEMALLOC_STATIC)
   if(NOT EXISTS ${DEP_ROOT_DIR})
     file(MAKE_DIRECTORY ${DEP_ROOT_DIR})
   endif()
-
+  if (ENABLE_JEMALLOC_DUMP)
+    set(ENABLE_JEMALLOC_STAT ON)
+  else ()
+    set(ENABLE_JEMALLOC_STAT OFF)
+  endif ()
   include(Jemalloc)
   include_directories(SYSTEM ${DEP_ROOT_DIR}/${JEMALLOC_NAME}/include/jemalloc)
   link_directories(${DEP_ROOT_DIR}/${JEMALLOC_NAME}/lib)
@@ -335,6 +354,12 @@ if(JEMALLOC_FOUND)
   message(STATUS "found library: ${JEMALLOC_LIBRARIES}")
   include_directories(${JEMALLOC_INCLUDE_DIR})
   update_cached_list(MK_LINK_LIBRARIES ${JEMALLOC_LIBRARIES})
+  add_definitions(-DUSE_JEMALLOC)
+  message(STATUS "jemalloc will be used to avoid memory fragmentation")
+  if (ENABLE_JEMALLOC_DUMP)
+    add_definitions(-DENABLE_JEMALLOC_DUMP)
+    message(STATUS "jemalloc will save memory usage statistics when the program exits")
+  endif ()
 endif()
 
 # 查找 openssl 是否安装
@@ -436,11 +461,6 @@ if(ENABLE_API)
   add_subdirectory(api)
 endif()
 
-# IOS 不编译可执行程序
-if(IOS)
-  return()
-endif()
-
 ##############################################################################
 
 if(ENABLE_PLAYER AND ENABLE_FFMPEG)
@@ -448,11 +468,18 @@ if(ENABLE_PLAYER AND ENABLE_FFMPEG)
 endif()
 
 #MediaServer主程序
-add_subdirectory(server)
+if(ENABLE_SERVER)
+  add_subdirectory(server)
+endif()
 
 # Android 会 add_subdirectory 并依赖该变量
-if(ENABLE_SERVER_LIB)
+if(ENABLE_SERVER_LIB AND NOT CMAKE_PARENT_LIST_FILE STREQUAL CMAKE_CURRENT_LIST_FILE)
   set(MK_LINK_LIBRARIES ${MK_LINK_LIBRARIES} PARENT_SCOPE)
+endif()
+
+# IOS 不编译可执行程序
+if(IOS)
+  return()
 endif()
 
 #cpp测试demo程序

@@ -11,14 +11,15 @@
 #ifndef ZLMEDIAKIT_FRAME_H
 #define ZLMEDIAKIT_FRAME_H
 
+#include <map>
 #include <mutex>
 #include <functional>
-#include "Util/RingBuffer.h"
-#include "Network/Socket.h"
-#include "Common/Stamp.h"
+#include "Util/List.h"
+#include "Util/TimeTicker.h"
+#include "Network/Buffer.h"
 
 namespace mediakit {
-
+class Stamp;
 typedef enum {
     TrackInvalid = -1,
     TrackVideo = 0,
@@ -38,7 +39,8 @@ typedef enum {
     XX(CodecL16,   TrackAudio, 6, "L16", PSI_STREAM_RESERVED)       \
     XX(CodecVP8,   TrackVideo, 7, "VP8", PSI_STREAM_VP8)            \
     XX(CodecVP9,   TrackVideo, 8, "VP9", PSI_STREAM_VP9)            \
-    XX(CodecAV1,   TrackVideo, 9, "AV1X", PSI_STREAM_AV1)
+    XX(CodecAV1,   TrackVideo, 9, "AV1", PSI_STREAM_AV1)            \
+    XX(CodecJPEG,  TrackVideo, 10, "JPEG", PSI_STREAM_RESERVED)
 
 typedef enum {
     CodecInvalid = -1,
@@ -80,7 +82,7 @@ TrackType getTrackType(CodecId codecId);
  */
 class CodecInfo {
 public:
-    typedef std::shared_ptr<CodecInfo> Ptr;
+    using Ptr = std::shared_ptr<CodecInfo>;
 
     CodecInfo() = default;
     virtual ~CodecInfo() = default;
@@ -226,7 +228,7 @@ protected:
 template <typename Parent>
 class FrameInternal : public Parent {
 public:
-    typedef std::shared_ptr<FrameInternal> Ptr;
+    using Ptr = std::shared_ptr<FrameInternal>;
     FrameInternal(const Frame::Ptr &parent_frame, char *ptr, size_t size, size_t prefix_size)
         : Parent(ptr, size, parent_frame->dts(), parent_frame->pts(), prefix_size) {
         _parent_frame = parent_frame;
@@ -246,7 +248,7 @@ private:
 template <typename Parent>
 class FrameTSInternal : public Parent {
 public:
-    typedef std::shared_ptr<FrameTSInternal> Ptr;
+    using Ptr = std::shared_ptr<FrameTSInternal>;
     FrameTSInternal(
         const Frame::Ptr &parent_frame, char *ptr, size_t size, size_t prefix_size, uint64_t dts, uint64_t pts)
         : Parent(ptr, size, dts, pts, prefix_size) {
@@ -263,7 +265,7 @@ private:
  */
 class FrameWriterInterface {
 public:
-    typedef std::shared_ptr<FrameWriterInterface> Ptr;
+    using Ptr = std::shared_ptr<FrameWriterInterface>;
     FrameWriterInterface() = default;
     virtual ~FrameWriterInterface() = default;
 
@@ -271,29 +273,11 @@ public:
      * 写入帧数据
      */
     virtual bool inputFrame(const Frame::Ptr &frame) = 0;
-};
-
-/**
- * 写帧接口转function，辅助类
- */
-class FrameWriterInterfaceHelper : public FrameWriterInterface {
-public:
-    typedef std::shared_ptr<FrameWriterInterfaceHelper> Ptr;
-    typedef std::function<bool(const Frame::Ptr &frame)> onWriteFrame;
 
     /**
-     * inputFrame后触发onWriteFrame回调
+     * 刷新输出所有frame缓存
      */
-    FrameWriterInterfaceHelper(const onWriteFrame &cb) { _writeCallback = cb; }
-    virtual ~FrameWriterInterfaceHelper() = default;
-
-    /**
-     * 写入帧数据
-     */
-    bool inputFrame(const Frame::Ptr &frame) override { return _writeCallback(frame); }
-
-private:
-    onWriteFrame _writeCallback;
+    virtual void flush() {};
 };
 
 /**
@@ -308,16 +292,18 @@ public:
     /**
      * 添加代理
      */
-    void addDelegate(const FrameWriterInterface::Ptr &delegate) {
-        std::lock_guard<std::mutex> lck(_mtx);
-        _delegates.emplace(delegate.get(), delegate);
+    FrameWriterInterface* addDelegate(FrameWriterInterface::Ptr delegate) {
+        std::lock_guard<std::recursive_mutex> lck(_mtx);
+        return _delegates.emplace(delegate.get(), std::move(delegate)).first->second.get();
     }
+
+    FrameWriterInterface* addDelegate(std::function<bool(const Frame::Ptr &frame)> cb);
 
     /**
      * 删除代理
      */
     void delDelegate(FrameWriterInterface *ptr) {
-        std::lock_guard<std::mutex> lck(_mtx);
+        std::lock_guard<std::recursive_mutex> lck(_mtx);
         _delegates.erase(ptr);
     }
 
@@ -325,7 +311,8 @@ public:
      * 写入帧并派发
      */
     bool inputFrame(const Frame::Ptr &frame) override {
-        std::lock_guard<std::mutex> lck(_mtx);
+        std::lock_guard<std::recursive_mutex> lck(_mtx);
+        doStatistics(frame);
         bool ret = false;
         for (auto &pr : _delegates) {
             if (pr.second->inputFrame(frame)) {
@@ -339,17 +326,65 @@ public:
      * 返回代理个数
      */
     size_t size() const {
-        std::lock_guard<std::mutex> lck(_mtx);
+        std::lock_guard<std::recursive_mutex> lck(_mtx);
         return _delegates.size();
     }
 
     void clear() {
-        std::lock_guard<std::mutex> lck(_mtx);
+        std::lock_guard<std::recursive_mutex> lck(_mtx);
         _delegates.clear();
     }
 
+    /**
+     * 获取累计关键帧数
+     */
+    uint64_t getVideoKeyFrames() const {
+        std::lock_guard<std::recursive_mutex> lck(_mtx);
+        return _video_key_frames;
+    }
+
+    /**
+     *  获取帧数
+     */
+    uint64_t getFrames() const {
+        std::lock_guard<std::recursive_mutex> lck(_mtx);
+        return _frames;
+    }
+
+    size_t getVideoGopSize() const {
+        std::lock_guard<std::recursive_mutex> lck(_mtx);
+        return _gop_size;
+    }
+
+    size_t getVideoGopInterval() const {
+        std::lock_guard<std::recursive_mutex> lck(_mtx);
+        return _gop_interval_ms;
+    }
+
 private:
-    mutable std::mutex _mtx;
+    void doStatistics(const Frame::Ptr &frame) {
+        if (!frame->configFrame() && !frame->dropAble()) {
+            // 忽略配置帧与可丢弃的帧
+            ++_frames;
+            if (frame->keyFrame() && frame->getTrackType() == TrackVideo) {
+                // 遇视频关键帧时统计
+                ++_video_key_frames;
+                _gop_size = _frames - _last_frames;
+                _gop_interval_ms = _ticker.elapsedTime();
+                _last_frames = _frames;
+                _ticker.resetTime();
+            }
+        }
+    }
+
+private:
+    toolkit::Ticker _ticker;
+    size_t _gop_interval_ms = 0;
+    size_t _gop_size = 0;
+    uint64_t _last_frames = 0;
+    uint64_t _frames = 0;
+    uint64_t _video_key_frames = 0;
+    mutable std::recursive_mutex _mtx;
     std::map<void *, FrameWriterInterface::Ptr> _delegates;
 };
 
@@ -358,7 +393,7 @@ private:
  */
 class FrameFromPtr : public Frame {
 public:
-    typedef std::shared_ptr<FrameFromPtr> Ptr;
+    using Ptr = std::shared_ptr<FrameFromPtr>;
 
     FrameFromPtr(
         CodecId codec_id, char *ptr, size_t size, uint64_t dts, uint64_t pts = 0, size_t prefix_size = 0,
@@ -411,7 +446,7 @@ protected:
  */
 class FrameCacheAble : public FrameFromPtr {
 public:
-    typedef std::shared_ptr<FrameCacheAble> Ptr;
+    using Ptr = std::shared_ptr<FrameCacheAble>;
 
     FrameCacheAble(const Frame::Ptr &frame, bool force_key_frame = false) {
         if (frame->cacheAble()) {
@@ -457,11 +492,7 @@ private:
 class FrameStamp : public Frame {
 public:
     using Ptr = std::shared_ptr<FrameStamp>;
-    FrameStamp(Frame::Ptr frame, Stamp &stamp, bool modify_stamp) {
-        _frame = std::move(frame);
-        //覆盖时间戳
-        stamp.revise(_frame->dts(), _frame->pts(), _dts, _pts, modify_stamp);
-    }
+    FrameStamp(Frame::Ptr frame, Stamp &stamp, int modify_stamp);
     ~FrameStamp() override {}
 
     uint64_t dts() const override { return (uint64_t)_dts; }
@@ -542,8 +573,13 @@ public:
     FrameMerger(int type);
     ~FrameMerger() = default;
 
+    /**
+     * 刷新输出缓冲，注意此时会调用FrameMerger::inputFrame传入的onOutput回调
+     * 请注意回调捕获参数此时是否有效
+     */
+    void flush();
     void clear();
-    bool inputFrame(const Frame::Ptr &frame, const onOutput &cb, toolkit::BufferLikeString *buffer = nullptr);
+    bool inputFrame(const Frame::Ptr &frame, onOutput cb, toolkit::BufferLikeString *buffer = nullptr);
 
 private:
     bool willFlush(const Frame::Ptr &frame) const;
@@ -552,6 +588,7 @@ private:
 private:
     int _type;
     bool _have_decode_able_frame = false;
+    onOutput _cb;
     toolkit::List<Frame::Ptr> _frame_cache;
 };
 

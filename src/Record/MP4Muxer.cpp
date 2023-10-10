@@ -8,18 +8,20 @@
  * may be found in the AUTHORS file in the root of the source tree.
  */
 
-#ifdef ENABLE_MP4
+#if defined(ENABLE_MP4) || defined(ENABLE_HLS_FMP4)
 
 #include "MP4Muxer.h"
-#include "Util/File.h"
+#include "Extension/AAC.h"
+#include "Extension/G711.h"
 #include "Extension/H264.h"
+#include "Extension/H265.h"
+#include "Extension/JPEG.h"
+#include "Common/config.h"
 
 using namespace std;
 using namespace toolkit;
 
 namespace mediakit {
-
-MP4Muxer::MP4Muxer() {}
 
 MP4Muxer::~MP4Muxer() {
     closeMP4();
@@ -61,12 +63,26 @@ bool MP4MuxerInterface::haveVideo() const {
     return _have_video;
 }
 
+uint64_t MP4MuxerInterface::getDuration() const {
+    uint64_t ret = 0;
+    for (auto &pr : _codec_to_trackid) {
+        if (pr.second.stamp.getRelativeStamp() > (int64_t)ret) {
+            ret = pr.second.stamp.getRelativeStamp();
+        }
+    }
+    return ret;
+}
+
 void MP4MuxerInterface::resetTracks() {
     _started = false;
     _have_video = false;
     _mov_writter = nullptr;
     _frame_merger.clear();
     _codec_to_trackid.clear();
+}
+
+void MP4MuxerInterface::flush() {
+    _frame_merger.flush();
 }
 
 bool MP4MuxerInterface::inputFrame(const Frame::Ptr &frame) {
@@ -88,12 +104,12 @@ bool MP4MuxerInterface::inputFrame(const Frame::Ptr &frame) {
 
     //mp4文件时间戳需要从0开始
     auto &track_info = it->second;
-    int64_t dts_out, pts_out;
     switch (frame->getCodecId()) {
         case CodecH264:
         case CodecH265: {
             //这里的代码逻辑是让SPS、PPS、IDR这些时间戳相同的帧打包到一起当做一个帧处理，
-            _frame_merger.inputFrame(frame, [&](uint64_t dts, uint64_t pts, const Buffer::Ptr &buffer, bool have_idr) {
+            _frame_merger.inputFrame(frame, [this, &track_info](uint64_t dts, uint64_t pts, const Buffer::Ptr &buffer, bool have_idr) {
+                int64_t dts_out, pts_out;
                 track_info.stamp.revise(dts, pts, dts_out, pts_out);
                 mp4_writer_write(_mov_writter.get(),
                                  track_info.track_id,
@@ -105,8 +121,21 @@ bool MP4MuxerInterface::inputFrame(const Frame::Ptr &frame) {
             });
             break;
         }
+        case CodecJPEG:{
+            int64_t dts_out, pts_out;
+            track_info.stamp.revise(frame->dts(), frame->pts(), dts_out, pts_out);
+            mp4_writer_write(_mov_writter.get(),
+                             track_info.track_id,
+                             frame->data(),
+                             frame->size(),
+                             pts_out,
+                             dts_out,
+                             frame->keyFrame() ? MOV_AV_FLAG_KEYFREAME : 0);
+            break;
+        }
 
         default: {
+            int64_t dts_out, pts_out;
             track_info.stamp.revise(frame->dts(), frame->pts(), dts_out, pts_out);
             mp4_writer_write(_mov_writter.get(),
                              track_info.track_id,
@@ -129,6 +158,7 @@ static uint8_t getObject(CodecId codecId) {
         case CodecAAC : return MOV_OBJECT_AAC;
         case CodecH264 : return MOV_OBJECT_H264;
         case CodecH265 : return MOV_OBJECT_HEVC;
+        case CodecJPEG : return MOV_OBJECT_JPEG;
         default : return 0;
     }
 }
@@ -204,8 +234,8 @@ bool MP4MuxerInterface::addTrack(const Track::Ptr &track) {
                                                  audio_track->getAudioChannel(),
                                                  audio_track->getAudioSampleBit() * audio_track->getAudioChannel(),
                                                  audio_track->getAudioSampleRate(),
-                                                 audio_track->getAacCfg().data(),
-                                                 audio_track->getAacCfg().size());
+                                                 audio_track->getConfig().data(),
+                                                 audio_track->getConfig().size());
             if (track_id < 0) {
                 WarnL << "添加AAC Track失败:" << track_id;
                 return false;
@@ -286,6 +316,28 @@ bool MP4MuxerInterface::addTrack(const Track::Ptr &track) {
             break;
         }
 
+    case CodecJPEG: {
+            auto jpeg_track = dynamic_pointer_cast<JPEGTrack>(track);
+            if (!jpeg_track) {
+                WarnL << "不是JPEG Track";
+                return false;
+            }
+
+            auto track_id = mp4_writer_add_video(_mov_writter.get(),
+                                                 mp4_object,
+                                                 jpeg_track->getVideoWidth(),
+                                                 jpeg_track->getVideoHeight(),
+                                                 nullptr,
+                                                 0);
+            if (track_id < 0) {
+                WarnL << "添加JPEG Track失败:" << track_id;
+                return false;
+            }
+            _codec_to_trackid[track->getCodecId()].track_id = track_id;
+            _have_video = true;
+            break;
+        }
+
         default: WarnL << "MP4录制不支持该编码格式:" << track->getCodecName(); return false;
     }
 
@@ -325,24 +377,24 @@ bool MP4MuxerMemory::inputFrame(const Frame::Ptr &frame) {
         return false;
     }
 
-    bool key_frame = frame->keyFrame();
-
-    //flush切片
+    // flush切片
     saveSegment();
 
     auto data = _memory_file->getAndClearMemory();
     if (!data.empty()) {
-        //输出切片数据
-        onSegmentData(std::move(data), frame->dts(), _key_frame);
+        // 输出切片数据
+        onSegmentData(std::move(data), _last_dst, _key_frame);
         _key_frame = false;
     }
 
-    if (key_frame) {
+    if (frame->keyFrame()) {
         _key_frame = true;
     }
-
+    if (frame->getTrackType() == TrackVideo || !haveVideo()) {
+        _last_dst = frame->dts();
+    }
     return MP4MuxerInterface::inputFrame(frame);
 }
 
 }//namespace mediakit
-#endif//#ifdef ENABLE_MP4
+#endif //defined(ENABLE_MP4) || defined(ENABLE_HLS_FMP4)

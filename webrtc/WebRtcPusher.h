@@ -12,6 +12,7 @@
 #define ZLMEDIAKIT_WEBRTCPUSHER_H
 
 #include "WebRtcTransport.h"
+#include "Rtsp/RtspMediaSource.h"
 
 namespace mediakit {
 
@@ -19,8 +20,9 @@ class WebRtcPusher : public WebRtcTransportImp, public MediaSourceEvent {
 public:
     using Ptr = std::shared_ptr<WebRtcPusher>;
     ~WebRtcPusher() override = default;
-    static Ptr create(const EventPoller::Ptr &poller, const RtspMediaSourceImp::Ptr &src,
-                      const std::shared_ptr<void> &ownership, const MediaInfo &info, const ProtocolOption &option);
+    static Ptr create(const EventPoller::Ptr &poller, const RtspMediaSource::Ptr &src,
+                      const std::shared_ptr<void> &ownership, const MediaInfo &info, const ProtocolOption &option, bool preferred_tcp = false);
+
 
 protected:
     ///////WebRtcTransportImp override///////
@@ -28,9 +30,10 @@ protected:
     void onDestory() override;
     void onRtcConfigure(RtcConfigure &configure) const override;
     void onRecvRtp(MediaTrack &track, const std::string &rid, RtpPacket::Ptr rtp) override;
+    void onShutdown(const SockException &ex) override;
     void onRtcpBye() override;
     ////  dtls相关的回调 ////
-   void OnDtlsTransportClosed(const RTC::DtlsTransport *dtlsTransport) override;
+    void OnDtlsTransportClosed(const RTC::DtlsTransport *dtlsTransport) override;
 
 protected:
     ///////MediaSourceEvent override///////
@@ -44,12 +47,14 @@ protected:
     std::string getOriginUrl(MediaSource &sender) const override;
     // 获取媒体源客户端相关信息
     std::shared_ptr<SockInfo> getOriginSock(MediaSource &sender) const override;
+    // 由于支持断连续推，存在OwnerPoller变更的可能
+    toolkit::EventPoller::Ptr getOwnerPoller(MediaSource &sender) override;
     // 获取丢包率
     float getLossRate(MediaSource &sender,TrackType type) override;
 
 private:
-    WebRtcPusher(const EventPoller::Ptr &poller, const RtspMediaSourceImp::Ptr &src,
-                 const std::shared_ptr<void> &ownership, const MediaInfo &info, const ProtocolOption &option);
+    WebRtcPusher(const EventPoller::Ptr &poller, const RtspMediaSource::Ptr &src,
+                 const std::shared_ptr<void> &ownership, const MediaInfo &info, const ProtocolOption &option, bool preferred_tcp);
 
 private:
     bool _simulcast = false;
@@ -58,10 +63,11 @@ private:
     //媒体相关元数据
     MediaInfo _media_info;
     //推流的rtsp源
-    RtspMediaSourceImp::Ptr _push_src;
+    RtspMediaSource::Ptr _push_src;
     //推流所有权
     std::shared_ptr<void> _push_src_ownership;
     //推流的rtsp源,支持simulcast
+    std::recursive_mutex _mtx;
     std::unordered_map<std::string/*rid*/, RtspMediaSource::Ptr> _push_src_sim;
     std::unordered_map<std::string/*rid*/, std::shared_ptr<void> > _push_src_sim_ownership;
 };

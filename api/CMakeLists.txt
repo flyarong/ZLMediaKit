@@ -28,21 +28,19 @@ file(GLOB API_SRC_LIST
   source/*.cpp
   source/*.h)
 
-set(LINK_LIBRARIES ${MK_LINK_LIBRARIES} jsoncpp)
-
-if(IOS)
-  add_library(mk_api STATIC ${API_SRC_LIST})
-  target_link_libraries(mk_api
-    PRIVATE ${LINK_LIBRARIES})
-  return()
-endif ()
+set(LINK_LIBRARIES ${MK_LINK_LIBRARIES})
 
 set(COMPILE_DEFINITIONS ${MK_COMPILE_DEFINITIONS})
-list(APPEND COMPILE_DEFINITIONS GENERATE_EXPORT)
+
+if (MSVC)
+  list(APPEND COMPILE_DEFINITIONS GENERATE_EXPORT)
+endif ()
 
 if(ENABLE_API_STATIC_LIB)
   add_library(mk_api STATIC ${API_SRC_LIST})
   list(APPEND COMPILE_DEFINITIONS MediaKitApi_STATIC)
+elseif(IOS)
+  add_library(mk_api STATIC ${API_SRC_LIST})
 else()
   add_library(mk_api SHARED ${API_SRC_LIST})
 endif()
@@ -62,7 +60,7 @@ if(CMAKE_SYSTEM_NAME MATCHES "Linux")
 elseif(CMAKE_SYSTEM_NAME MATCHES "Android")
   target_link_libraries(mk_api log -Wl,--start-group ${LINK_LIBRARIES} -Wl,--end-group)
 else()
-  target_link_libraries(mk_api jsoncpp ${LINK_LIBRARIES})
+  target_link_libraries(mk_api ${LINK_LIBRARIES})
 endif()
 
 generate_export_header(mk_api
@@ -71,11 +69,19 @@ generate_export_header(mk_api
   STATIC_DEFINE MediaKitApi_STATIC
   EXPORT_FILE_NAME "${CMAKE_CURRENT_BINARY_DIR}/mk_export.h")
 
-add_subdirectory(tests)
-
 file(GLOB API_HEADER_LIST include/*.h ${CMAKE_CURRENT_BINARY_DIR}/*.h)
 install(FILES ${API_HEADER_LIST}
   DESTINATION ${INSTALL_PATH_INCLUDE})
 install(TARGETS mk_api
   ARCHIVE DESTINATION ${INSTALL_PATH_LIB}
-  LIBRARY DESTINATION ${INSTALL_PATH_LIB})
+  LIBRARY DESTINATION ${INSTALL_PATH_LIB}
+  RUNTIME DESTINATION ${INSTALL_PATH_RUNTIME})
+
+# IOS 跳过测试代码
+if(IOS)
+  return()
+endif()
+
+if (ENABLE_TESTS)
+  add_subdirectory(tests)
+endif()

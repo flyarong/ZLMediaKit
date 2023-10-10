@@ -13,7 +13,7 @@
 
 #if defined(ENABLE_HLS) || defined(ENABLE_RTPPROXY)
 
-#include "mpeg-ts-proto.h"
+#include "mpeg-ts.h"
 #include "mpeg-muxer.h"
 
 using namespace toolkit;
@@ -30,19 +30,18 @@ MpegMuxer::~MpegMuxer() {
     releaseContext();
 }
 
-#define XX(name, type, value, str, mpeg_id)                                                            \
-    case name : {                                                                                      \
-        if (mpeg_id == PSI_STREAM_RESERVED) {                                                          \
-            break;                                                                                     \
-        }                                                                                              \
-        _codec_to_trackid[track->getCodecId()] = mpeg_muxer_add_stream((::mpeg_muxer_t *)_context, mpeg_id, nullptr, 0); \
-        return true;                                                                                   \
+#define XX(name, type, value, str, mpeg_id)                                                                                                                    \
+    case name: {                                                                                                                                               \
+        if (mpeg_id == PSI_STREAM_RESERVED) {                                                                                                                  \
+            break;                                                                                                                                             \
+        }                                                                                                                                                      \
+        if (track->getTrackType() == TrackVideo) {                                                                                                             \
+            _have_video = true;                                                                                                                                \
+        }                                                                                                                                                      \
+        _codec_to_trackid[track->getCodecId()] = mpeg_muxer_add_stream((::mpeg_muxer_t *)_context, mpeg_id, nullptr, 0);                                       \
+        return true;                                                                                                                                           \
     }
-
 bool MpegMuxer::addTrack(const Track::Ptr &track) {
-    if (track->getTrackType() == TrackVideo) {
-        _have_video = true;
-    }
     switch (track->getCodecId()) {
         CODEC_MAP(XX)
         default: break;
@@ -63,7 +62,7 @@ bool MpegMuxer::inputFrame(const Frame::Ptr &frame) {
         case CodecH264:
         case CodecH265: {
             //这里的代码逻辑是让SPS、PPS、IDR这些时间戳相同的帧打包到一起当做一个帧处理，
-            return _frame_merger.inputFrame(frame,[&](uint64_t dts, uint64_t pts, const Buffer::Ptr &buffer, bool have_idr) {
+            return _frame_merger.inputFrame(frame,[this, track_id](uint64_t dts, uint64_t pts, const Buffer::Ptr &buffer, bool have_idr) {
                 _key_pos = have_idr;
                 //取视频时间戳为TS的时间戳
                 _timestamp = dts;
@@ -83,6 +82,11 @@ bool MpegMuxer::inputFrame(const Frame::Ptr &frame) {
         default: {
             if (!_have_video) {
                 //没有视频时，才以音频时间戳为TS的时间戳
+                _timestamp = frame->dts();
+            }
+
+            if(frame->getTrackType() == TrackType::TrackVideo){
+                _key_pos = frame->keyFrame();
                 _timestamp = frame->dts();
             }
             _max_cache_size = 512 + 1.2 * frame->size();
@@ -151,6 +155,10 @@ void MpegMuxer::releaseContext() {
     }
     _codec_to_trackid.clear();
     _frame_merger.clear();
+}
+
+void MpegMuxer::flush() {
+    _frame_merger.flush();
 }
 
 }//mediakit

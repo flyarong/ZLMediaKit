@@ -15,6 +15,7 @@
 #include "Common/config.h"
 #include "MP4Recorder.h"
 #include "Thread/WorkThreadPool.h"
+#include "MP4Muxer.h"
 
 using namespace std;
 using namespace toolkit;
@@ -28,30 +29,32 @@ MP4Recorder::MP4Recorder(const string &path, const string &vhost, const string &
     _info.stream = stream_id;
     _info.vhost = vhost;
     _info.folder = path;
-    GET_CONFIG(size_t ,recordSec,Record::kFileSecond);
-    _max_second = max_second ? max_second : recordSec;
+    GET_CONFIG(uint32_t, s_max_second, Protocol::kMP4MaxSecond);
+    _max_second = max_second ? max_second : s_max_second;
 }
 
 MP4Recorder::~MP4Recorder() {
+    flush();
     closeFile();
 }
 
 void MP4Recorder::createFile() {
     closeFile();
     auto date = getTimeStr("%Y-%m-%d");
-    auto time = getTimeStr("%H-%M-%S");
-    auto full_path_tmp = _folder_path + date + "/." + time + ".mp4";
-    auto full_path = _folder_path + date + "/" + time + ".mp4";
+    auto file_name = getTimeStr("%H-%M-%S") + "-" + std::to_string(_file_index++) + ".mp4";
+    auto full_path = _folder_path + date + "/" + file_name;
+    auto full_path_tmp = _folder_path + date + "/." + file_name;
 
     /////record 业务逻辑//////
     _info.start_time = ::time(NULL);
-    _info.file_name = time + ".mp4";
+    _info.file_name = file_name;
     _info.file_path = full_path;
     GET_CONFIG(string, appName, Record::kAppName);
-    _info.url = appName + "/" + _info.app + "/" + _info.stream + "/" + date + "/" + time + ".mp4";
+    _info.url = appName + "/" + _info.app + "/" + _info.stream + "/" + date + "/" + file_name;
 
     try {
         _muxer = std::make_shared<MP4Muxer>();
+        TraceL << "Open tmp mp4 file: " << full_path_tmp;
         _muxer->openMP4(full_path_tmp);
         for (auto &track :_tracks) {
             //添加track
@@ -69,26 +72,27 @@ void MP4Recorder::asyncClose() {
     auto full_path_tmp = _full_path_tmp;
     auto full_path = _full_path;
     auto info = _info;
+    TraceL << "Start close tmp mp4 file: " << full_path_tmp;
     WorkThreadPool::Instance().getExecutor()->async([muxer, full_path_tmp, full_path, info]() mutable {
-        //获取文件录制时间，放在关闭mp4之前是为了忽略关闭mp4执行时间
-        info.time_len = (float) (::time(NULL) - info.start_time);
-        //关闭mp4非常耗时，所以要放在后台线程执行
+        info.time_len = muxer->getDuration() / 1000.0f;
+        // 关闭mp4可能非常耗时，所以要放在后台线程执行
+        TraceL << "Closing tmp mp4 file: " << full_path_tmp;
         muxer->closeMP4();
-        
-        if(!full_path_tmp.empty()) {
-            //获取文件大小
+        TraceL << "Closed tmp mp4 file: " << full_path_tmp;
+        if (!full_path_tmp.empty()) {
+            // 获取文件大小
             info.file_size = File::fileSize(full_path_tmp.data());
             if (info.file_size < 1024) {
-                //录像文件太小，删除之
+                // 录像文件太小，删除之
                 File::delete_file(full_path_tmp.data());
                 return;
             }
-            //临时文件名改成正式文件名，防止mp4未完成时被访问
+            // 临时文件名改成正式文件名，防止mp4未完成时被访问
             rename(full_path_tmp.data(), full_path.data());
         }
-
-        /////record 业务逻辑//////
-        NoticeCenter::Instance().emitEvent(Broadcast::kBroadcastRecordMP4, info);
+        TraceL << "Emit mp4 record event: " << full_path;
+        //触发mp4录制切片生成事件
+        NOTICE_EMIT(BroadcastRecordMP4Args, Broadcast::kBroadcastRecordMP4, info);
     });
 }
 
@@ -96,6 +100,12 @@ void MP4Recorder::closeFile() {
     if (_muxer) {
         asyncClose();
         _muxer = nullptr;
+    }
+}
+
+void MP4Recorder::flush() {
+    if (_muxer) {
+        _muxer->flush();
     }
 }
 

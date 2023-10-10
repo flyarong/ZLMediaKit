@@ -14,8 +14,8 @@
 using namespace toolkit;
 using namespace std;
 
-//协议解析最大缓存1兆数据
-static constexpr size_t kMaxCacheSize = 1 * 1024 * 1024;
+//协议解析最大缓存4兆数据
+static constexpr size_t kMaxCacheSize = 4 * 1024 * 1024;
 
 namespace mediakit {
 
@@ -91,7 +91,7 @@ void HttpRequestSplitter::input(const char *data,size_t len) {
             _remain_data.assign(ptr, _remain_data_size);
             return;
         }
-        //收到content数据，并且接受content完毕
+        //收到content数据，并且接收content完毕
         onRecvContent(ptr,_content_len);
 
         _remain_data_size -= _content_len;

@@ -13,7 +13,7 @@
 
 #include <string>
 #include <functional>
-#include "jsoncpp/json.h"
+#include "json/json.h"
 
 //支持json或urlencoded方式传输参数
 #define JSON_ARGS
@@ -31,6 +31,7 @@ extern const std::string kTimeoutSec;
 
 void installWebHook();
 void unInstallWebHook();
+void onProcessExited();
 /**
  * 触发http hook请求
  * @param url 请求地址

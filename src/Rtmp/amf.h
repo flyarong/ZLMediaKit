@@ -14,12 +14,12 @@
 #include <assert.h>
 #include <string>
 #include <vector>
-#include <unordered_map>
 #include <map>
-#include <stdexcept>
 #include <functional>
-#include "Network/Buffer.h"
-
+#include <cstdint>
+namespace toolkit {
+    class BufferLikeString;
+}
 enum AMFType {
     AMF_NUMBER,
     AMF_INTEGER,

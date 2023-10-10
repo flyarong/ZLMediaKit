@@ -12,6 +12,7 @@
 #define ZLMEDIAKIT_WEBRTCPLAYER_H
 
 #include "WebRtcTransport.h"
+#include "Rtsp/RtspMediaSource.h"
 
 namespace mediakit {
 
@@ -19,7 +20,8 @@ class WebRtcPlayer : public WebRtcTransportImp {
 public:
     using Ptr = std::shared_ptr<WebRtcPlayer>;
     ~WebRtcPlayer() override = default;
-    static Ptr create(const EventPoller::Ptr &poller, const RtspMediaSource::Ptr &src, const MediaInfo &info);
+    static Ptr create(const EventPoller::Ptr &poller, const RtspMediaSource::Ptr &src, const MediaInfo &info, bool preferred_tcp = false);
+    MediaInfo getMediaInfo() { return _media_info; }
 
 protected:
     ///////WebRtcTransportImp override///////
@@ -29,13 +31,13 @@ protected:
     void onRecvRtp(MediaTrack &track, const std::string &rid, RtpPacket::Ptr rtp) override {};
 
 private:
-    WebRtcPlayer(const EventPoller::Ptr &poller, const RtspMediaSource::Ptr &src, const MediaInfo &info);
+    WebRtcPlayer(const EventPoller::Ptr &poller, const RtspMediaSource::Ptr &src, const MediaInfo &info, bool preferred_tcp);
 
 private:
     //媒体相关元数据
     MediaInfo _media_info;
     //播放的rtsp源
-    RtspMediaSource::Ptr _play_src;
+    std::weak_ptr<RtspMediaSource> _play_src;
     //播放rtsp源的reader对象
     RtspMediaSource::RingType::RingReader::Ptr _reader;
 };

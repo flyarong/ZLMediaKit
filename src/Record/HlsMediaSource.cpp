@@ -9,6 +9,7 @@
  */
 
 #include "HlsMediaSource.h"
+#include "Common/config.h"
 
 using namespace toolkit;
 
@@ -32,6 +33,12 @@ void HlsCookieData::addReaderCount() {
                 // HlsMediaSource已经销毁
                 *added = false;
             });
+            auto info = _sock_info;
+            _ring_reader->setGetInfoCB([info]() {
+                Any ret;
+                ret.set(info);
+                return ret;
+            });
         }
     }
 }
@@ -45,7 +52,11 @@ HlsCookieData::~HlsCookieData() {
         GET_CONFIG(uint32_t, iFlowThreshold, General::kFlowThreshold);
         uint64_t bytes = _bytes.load();
         if (bytes >= iFlowThreshold * 1024) {
-            NoticeCenter::Instance().emitEvent(Broadcast::kBroadcastFlowReport, _info, bytes, duration, true, static_cast<SockInfo &>(*_sock_info));
+            try {
+                NOTICE_EMIT(BroadcastFlowReportArgs, Broadcast::kBroadcastFlowReport, _info, bytes, duration, true, *_sock_info);
+            } catch (std::exception &ex) {
+                WarnL << "Exception occurred: " << ex.what();
+            }
         }
     }
 }
@@ -62,6 +73,42 @@ void HlsCookieData::setMediaSource(const HlsMediaSource::Ptr &src) {
 
 HlsMediaSource::Ptr HlsCookieData::getMediaSource() const {
     return _src.lock();
+}
+
+void HlsMediaSource::setIndexFile(std::string index_file)
+{
+    if (!_ring) {
+        std::weak_ptr<HlsMediaSource> weakSelf = std::static_pointer_cast<HlsMediaSource>(shared_from_this());
+        auto lam = [weakSelf](int size) {
+            auto strongSelf = weakSelf.lock();
+            if (!strongSelf) {
+                return;
+            }
+            strongSelf->onReaderChanged(size);
+        };
+        _ring = std::make_shared<RingType>(0, std::move(lam));
+        regist();
+    }
+
+    //赋值m3u8索引文件内容
+    std::lock_guard<std::mutex> lck(_mtx_index);
+    _index_file = std::move(index_file);
+
+    if (!_index_file.empty()) {
+        _list_cb.for_each([&](const std::function<void(const std::string& str)>& cb) { cb(_index_file); });
+        _list_cb.clear();
+    }
+}
+
+void HlsMediaSource::getIndexFile(std::function<void(const std::string& str)> cb)
+{
+    std::lock_guard<std::mutex> lck(_mtx_index);
+    if (!_index_file.empty()) {
+        cb(_index_file);
+        return;
+    }
+    //等待生成m3u8文件
+    _list_cb.emplace_back(std::move(cb));
 }
 
 } // namespace mediakit

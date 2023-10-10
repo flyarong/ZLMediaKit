@@ -12,6 +12,8 @@
 #define ZLMEDIAKIT_FMP4MEDIASOURCE_H
 
 #include "Common/MediaSource.h"
+#include "Common/PacketCache.h"
+#include "Util/RingBuffer.h"
 
 #define FMP4_GOP_SIZE 512
 
@@ -31,18 +33,16 @@ public:
 };
 
 //FMP4直播源
-class FMP4MediaSource : public MediaSource, public toolkit::RingDelegate<FMP4Packet::Ptr>, private PacketCache<FMP4Packet>{
+class FMP4MediaSource final : public MediaSource, public toolkit::RingDelegate<FMP4Packet::Ptr>, private PacketCache<FMP4Packet>{
 public:
     using Ptr = std::shared_ptr<FMP4MediaSource>;
     using RingDataType = std::shared_ptr<toolkit::List<FMP4Packet::Ptr> >;
     using RingType = toolkit::RingBuffer<RingDataType>;
 
-    FMP4MediaSource(const std::string &vhost,
-                    const std::string &app,
-                    const std::string &stream_id,
-                    int ring_size = FMP4_GOP_SIZE) : MediaSource(FMP4_SCHEMA, vhost, app, stream_id), _ring_size(ring_size) {}
+    FMP4MediaSource(const MediaTuple& tuple,
+                    int ring_size = FMP4_GOP_SIZE) : MediaSource(FMP4_SCHEMA, tuple), _ring_size(ring_size) {}
 
-    ~FMP4MediaSource() override = default;
+    ~FMP4MediaSource() override { flush(); }
 
     /**
      * 获取媒体源的环形缓冲
@@ -51,8 +51,8 @@ public:
         return _ring;
     }
 
-    void getPlayerList(const std::function<void(const std::list<std::shared_ptr<void>> &info_list)> &cb,
-                       const std::function<std::shared_ptr<void>(std::shared_ptr<void> &&info)> &on_change) override {
+    void getPlayerList(const std::function<void(const std::list<toolkit::Any> &info_list)> &cb,
+                       const std::function<toolkit::Any(toolkit::Any &&info)> &on_change) override {
         _ring->getInfoList(cb, on_change);
     }
 
@@ -106,7 +106,7 @@ public:
 
 private:
     void createRing(){
-        std::weak_ptr<FMP4MediaSource> weak_self = std::dynamic_pointer_cast<FMP4MediaSource>(shared_from_this());
+        std::weak_ptr<FMP4MediaSource> weak_self = std::static_pointer_cast<FMP4MediaSource>(shared_from_this());
         _ring = std::make_shared<RingType>(_ring_size, [weak_self](int size) {
             auto strong_self = weak_self.lock();
             if (!strong_self) {

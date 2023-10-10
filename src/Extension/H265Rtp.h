@@ -12,8 +12,8 @@
 #define ZLMEDIAKIT_H265RTPCODEC_H
 
 #include "Rtsp/RtpCodec.h"
-#include "Util/ResourcePool.h"
 #include "Extension/H265.h"
+// for DtsGenerator
 #include "Common/Stamp.h"
 
 namespace mediakit{
@@ -25,7 +25,7 @@ namespace mediakit{
  */
 class H265RtpDecoder : public RtpCodec {
 public:
-    typedef std::shared_ptr<H265RtpDecoder> Ptr;
+    using Ptr = std::shared_ptr<H265RtpDecoder>;
 
     H265RtpDecoder();
     ~H265RtpDecoder() {}
@@ -64,7 +64,7 @@ private:
  */
 class H265RtpEncoder : public H265RtpDecoder ,public RtpInfo{
 public:
-    typedef std::shared_ptr<H265RtpEncoder> Ptr;
+    using Ptr = std::shared_ptr<H265RtpEncoder>;
 
     /**
      * @param ui32Ssrc ssrc
@@ -85,6 +85,22 @@ public:
      * @param frame 帧数据，必须
      */
     bool inputFrame(const Frame::Ptr &frame) override;
+
+    /**
+     * 刷新输出所有frame缓存
+     */
+    void flush() override;
+
+private:
+    void packRtp(const char *ptr, size_t len, uint64_t pts, bool is_mark, bool gop_pos);
+    void packRtpFu(const char *ptr, size_t len, uint64_t pts, bool is_mark, bool gop_pos);
+    void insertConfigFrame(uint64_t pts);
+    bool inputFrame_l(const Frame::Ptr &frame, bool is_mark);
+private:
+    Frame::Ptr _sps;
+    Frame::Ptr _pps;
+    Frame::Ptr _vps;
+    Frame::Ptr _last_frame;
 };
 
 }//namespace mediakit{

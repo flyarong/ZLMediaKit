@@ -12,6 +12,8 @@
 #define ZLMEDIAKIT_TSMEDIASOURCE_H
 
 #include "Common/MediaSource.h"
+#include "Common/PacketCache.h"
+#include "Util/RingBuffer.h"
 
 #define TS_GOP_SIZE 512
 
@@ -31,18 +33,15 @@ public:
 };
 
 //TS直播源
-class TSMediaSource : public MediaSource, public toolkit::RingDelegate<TSPacket::Ptr>, private PacketCache<TSPacket>{
+class TSMediaSource final : public MediaSource, public toolkit::RingDelegate<TSPacket::Ptr>, private PacketCache<TSPacket>{
 public:
     using Ptr = std::shared_ptr<TSMediaSource>;
     using RingDataType = std::shared_ptr<toolkit::List<TSPacket::Ptr> >;
     using RingType = toolkit::RingBuffer<RingDataType>;
 
-    TSMediaSource(const std::string &vhost,
-                  const std::string &app,
-                  const std::string &stream_id,
-                  int ring_size = TS_GOP_SIZE) : MediaSource(TS_SCHEMA, vhost, app, stream_id), _ring_size(ring_size) {}
+    TSMediaSource(const MediaTuple& tuple, int ring_size = TS_GOP_SIZE): MediaSource(TS_SCHEMA, tuple), _ring_size(ring_size) {}
 
-    ~TSMediaSource() override = default;
+    ~TSMediaSource() override { flush(); }
 
     /**
      * 获取媒体源的环形缓冲
@@ -51,8 +50,8 @@ public:
         return _ring;
     }
 
-    void getPlayerList(const std::function<void(const std::list<std::shared_ptr<void>> &info_list)> &cb,
-                       const std::function<std::shared_ptr<void>(std::shared_ptr<void> &&info)> &on_change) override {
+    void getPlayerList(const std::function<void(const std::list<toolkit::Any> &info_list)> &cb,
+                       const std::function<toolkit::Any(toolkit::Any &&info)> &on_change) override {
         _ring->getInfoList(cb, on_change);
     }
 
@@ -90,7 +89,7 @@ public:
 
 private:
     void createRing(){
-        std::weak_ptr<TSMediaSource> weak_self = std::dynamic_pointer_cast<TSMediaSource>(shared_from_this());
+        std::weak_ptr<TSMediaSource> weak_self = std::static_pointer_cast<TSMediaSource>(shared_from_this());
         _ring = std::make_shared<RingType>(_ring_size, [weak_self](int size) {
             auto strong_self = weak_self.lock();
             if (!strong_self) {

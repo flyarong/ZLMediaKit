@@ -18,7 +18,9 @@
 #include "Network/UdpServer.h"
 #include "RtpSession.h"
 
-namespace mediakit{
+namespace mediakit {
+
+class RtcpHelper;
 
 /**
  * RTP服务器，支持UDP/TCP
@@ -29,7 +31,7 @@ public:
     using onRecv = std::function<void(const toolkit::Buffer::Ptr &buf)>;
     enum TcpMode { NONE = 0, PASSIVE, ACTIVE };
 
-    RtpServer();
+    RtpServer() = default;
     ~RtpServer();
 
     /**
@@ -42,7 +44,7 @@ public:
      * @param ssrc 指定的ssrc
      */
     void start(uint16_t local_port, const std::string &stream_id = "", TcpMode tcp_mode = PASSIVE,
-               const char *local_ip = "::", bool re_use_port = true, uint32_t ssrc = 0);
+               const char *local_ip = "::", bool re_use_port = true, uint32_t ssrc = 0, bool only_audio = false);
 
     /**
      * 连接到tcp服务(tcp主动模式)
@@ -60,7 +62,12 @@ public:
     /**
      * 设置RtpProcess onDetach事件回调
      */
-    void setOnDetach(const std::function<void()> &cb);
+    void setOnDetach(std::function<void()> cb);
+
+    /**
+     * 更新ssrc
+     */
+    void updateSSRC(uint32_t ssrc);
 
 private:
     // tcp主动模式连接服务器成功回调
@@ -70,9 +77,11 @@ protected:
     toolkit::Socket::Ptr _rtp_socket;
     toolkit::UdpServer::Ptr _udp_server;
     toolkit::TcpServer::Ptr _tcp_server;
-    RtpProcess::Ptr _rtp_process;
+    std::shared_ptr<uint32_t> _ssrc;
+    std::shared_ptr<RtcpHelper> _rtcp_helper;
     std::function<void()> _on_cleanup;
 
+    bool _only_audio = false;
     //用于tcp主动模式
     TcpMode _tcp_mode = NONE;
 };

@@ -21,7 +21,7 @@ namespace mediakit{
  */
 class CommonRtpDecoder : public RtpCodec {
 public:
-    typedef std::shared_ptr <CommonRtpDecoder> Ptr;
+    using Ptr = std::shared_ptr <CommonRtpDecoder>;
 
     ~CommonRtpDecoder() override {}
 
@@ -50,6 +50,7 @@ private:
 private:
     bool _drop_flag = false;
     uint16_t _last_seq = 0;
+    uint64_t _last_stamp = 0;
     size_t _max_frame_size;
     CodecId _codec;
     FrameImp::Ptr _frame;
@@ -60,7 +61,7 @@ private:
  */
 class CommonRtpEncoder : public CommonRtpDecoder, public RtpInfo {
 public:
-    typedef std::shared_ptr <CommonRtpEncoder> Ptr;
+    using Ptr = std::shared_ptr <CommonRtpEncoder>;
 
     ~CommonRtpEncoder() override {}
 

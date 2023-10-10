@@ -13,6 +13,7 @@
 
 #include "Common/MediaSource.h"
 #include "Util/TimeTicker.h"
+#include "Util/RingBuffer.h"
 #include <atomic>
 
 namespace mediakit {
@@ -24,8 +25,7 @@ public:
     using RingType = toolkit::RingBuffer<std::string>;
     using Ptr = std::shared_ptr<HlsMediaSource>;
 
-    HlsMediaSource(const std::string &vhost, const std::string &app, const std::string &stream_id)
-        : MediaSource(HLS_SCHEMA, vhost, app, stream_id) {}
+    HlsMediaSource(const std::string &schema, const MediaTuple &tuple) : MediaSource(schema, tuple) {}
     ~HlsMediaSource() override = default;
 
     /**
@@ -41,42 +41,12 @@ public:
     /**
      * 设置或清空m3u8索引文件内容
      */
-    void setIndexFile(std::string index_file) {
-        if (!_ring) {
-            std::weak_ptr<HlsMediaSource> weakSelf = std::dynamic_pointer_cast<HlsMediaSource>(shared_from_this());
-            auto lam = [weakSelf](int size) {
-                auto strongSelf = weakSelf.lock();
-                if (!strongSelf) {
-                    return;
-                }
-                strongSelf->onReaderChanged(size);
-            };
-            _ring = std::make_shared<RingType>(0, std::move(lam));
-            regist();
-        }
-
-        //赋值m3u8索引文件内容
-        std::lock_guard<std::mutex> lck(_mtx_index);
-        _index_file = std::move(index_file);
-
-        if (!_index_file.empty()) {
-            _list_cb.for_each([&](const std::function<void(const std::string &str)> &cb) { cb(_index_file); });
-            _list_cb.clear();
-        }
-    }
+    void setIndexFile(std::string index_file);
 
     /**
      * 异步获取m3u8文件
      */
-    void getIndexFile(std::function<void(const std::string &str)> cb) {
-        std::lock_guard<std::mutex> lck(_mtx_index);
-        if (!_index_file.empty()) {
-            cb(_index_file);
-            return;
-        }
-        //等待生成m3u8文件
-        _list_cb.emplace_back(std::move(cb));
-    }
+    void getIndexFile(std::function<void(const std::string &str)> cb);
 
     /**
      * 同步获取m3u8文件
@@ -87,6 +57,11 @@ public:
     }
 
     void onSegmentSize(size_t bytes) { _speed[TrackVideo] += bytes; }
+
+    void getPlayerList(const std::function<void(const std::list<toolkit::Any> &info_list)> &cb,
+                       const std::function<toolkit::Any(toolkit::Any &&info)> &on_change) override {
+        _ring->getInfoList(cb, on_change);
+    }
 
 private:
     RingType::Ptr _ring;

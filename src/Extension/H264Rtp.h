@@ -12,8 +12,8 @@
 #define ZLMEDIAKIT_H264RTPCODEC_H
 
 #include "Rtsp/RtpCodec.h"
-#include "Util/ResourcePool.h"
 #include "Extension/H264.h"
+// for DtsGenerator
 #include "Common/Stamp.h"
 
 namespace mediakit{
@@ -25,10 +25,10 @@ namespace mediakit{
  */
 class H264RtpDecoder : public RtpCodec{
 public:
-    typedef std::shared_ptr<H264RtpDecoder> Ptr;
+    using Ptr = std::shared_ptr<H264RtpDecoder>;
 
     H264RtpDecoder();
-    ~H264RtpDecoder() {}
+    ~H264RtpDecoder() override = default;
 
     /**
      * 输入264 rtp包
@@ -63,7 +63,7 @@ private:
  */
 class H264RtpEncoder : public H264RtpDecoder ,public RtpInfo{
 public:
-    typedef std::shared_ptr<H264RtpEncoder> Ptr;
+    using Ptr = std::shared_ptr<H264RtpEncoder>;
 
     /**
      * @param ssrc ssrc
@@ -77,13 +77,19 @@ public:
                    uint32_t sample_rate = 90000,
                    uint8_t pt = 96,
                    uint8_t interleaved = TrackVideo * 2);
-    ~H264RtpEncoder() {}
 
-    /**
+    ~H264RtpEncoder() override = default;
+
+        /**
      * 输入264帧
      * @param frame 帧数据，必须
      */
     bool inputFrame(const Frame::Ptr &frame) override;
+
+    /**
+     * 刷新输出所有frame缓存
+     */
+    void flush() override;
 
 private:
     void insertConfigFrame(uint64_t pts);
@@ -91,6 +97,8 @@ private:
     void packRtp(const char *data, size_t len, uint64_t pts, bool is_mark, bool gop_pos);
     void packRtpFu(const char *data, size_t len, uint64_t pts, bool is_mark, bool gop_pos);
     void packRtpStapA(const char *data, size_t len, uint64_t pts, bool is_mark, bool gop_pos);
+    void packRtpSingleNalu(const char *data, size_t len, uint64_t pts, bool is_mark, bool gop_pos);
+    void packRtpSmallFrame(const char *data, size_t len, uint64_t pts, bool is_mark, bool gop_pos);
 
 private:
     Frame::Ptr _sps;

@@ -12,6 +12,7 @@
 #include "PlayerBase.h"
 #include "Rtsp/RtspPlayerImp.h"
 #include "Rtmp/RtmpPlayerImp.h"
+#include "Rtmp/FlvPlayer.h"
 #include "Http/HlsPlayer.h"
 #include "Http/TsPlayerImp.h"
 
@@ -20,15 +21,16 @@ using namespace toolkit;
 
 namespace mediakit {
 
-PlayerBase::Ptr PlayerBase::createPlayer(const EventPoller::Ptr &poller, const string &url_in) {
-    static auto releasePlayer = [](PlayerBase *ptr) {
-        onceToken token(nullptr, [&]() {
-            delete ptr;
+PlayerBase::Ptr PlayerBase::createPlayer(const EventPoller::Ptr &in_poller, const string &url_in) {
+    auto poller = in_poller ? in_poller : EventPollerPool::Instance().getPoller();
+    static auto releasePlayer = [poller](PlayerBase *ptr) {
+        poller->async([ptr]() {
+            onceToken token(nullptr, [&]() { delete ptr; });
+            ptr->teardown();
         });
-        ptr->teardown();
     };
     string url = url_in;
-    string prefix = FindField(url.data(), NULL, "://");
+    string prefix = findSubString(url.data(), NULL, "://");
     auto pos = url.find('?');
     if (pos != string::npos) {
         //去除？后面的字符串
@@ -53,8 +55,12 @@ PlayerBase::Ptr PlayerBase::createPlayer(const EventPoller::Ptr &poller, const s
     if ((strcasecmp("http", prefix.data()) == 0 || strcasecmp("https", prefix.data()) == 0)) {
         if (end_with(url, ".m3u8") || end_with(url_in, ".m3u8")) {
             return PlayerBase::Ptr(new HlsPlayerImp(poller), releasePlayer);
-        } else if (end_with(url, ".ts") || end_with(url_in, ".ts")) {
+        }
+        if (end_with(url, ".ts") || end_with(url_in, ".ts")) {
             return PlayerBase::Ptr(new TsPlayerImp(poller), releasePlayer);
+        }
+        if (end_with(url, ".flv") || end_with(url_in, ".flv")) {
+            return PlayerBase::Ptr(new FlvPlayerImp(poller), releasePlayer);
         }
     }
 
@@ -66,89 +72,6 @@ PlayerBase::PlayerBase() {
     this->mINI::operator[](Client::kMediaTimeoutMS) = 5000;
     this->mINI::operator[](Client::kBeatIntervalMS) = 5000;
     this->mINI::operator[](Client::kWaitTrackReady) = true;
-}
-
-///////////////////////////DemuxerSink//////////////////////////////
-
-void MediaSinkDelegate::setTrackListener(TrackListener *listener) {
-    _listener = listener;
-}
-
-bool MediaSinkDelegate::onTrackReady(const Track::Ptr &track) {
-    if (_listener) {
-        _listener->addTrack(track);
-    }
-    return true;
-}
-
-void MediaSinkDelegate::onAllTrackReady() {
-    if (_listener) {
-        _listener->addTrackCompleted();
-    }
-}
-
-void MediaSinkDelegate::resetTracks() {
-    MediaSink::resetTracks();
-    if (_listener) {
-        _listener->resetTracks();
-    }
-}
-
-///////////////////////////Demuxer//////////////////////////////
-
-void Demuxer::setTrackListener(TrackListener *listener, bool wait_track_ready) {
-    if (wait_track_ready) {
-        auto sink = std::make_shared<MediaSinkDelegate>();
-        sink->setTrackListener(listener);
-        _sink = std::move(sink);
-    }
-    _listener = listener;
-}
-
-bool Demuxer::addTrack(const Track::Ptr &track) {
-    if (!_sink) {
-        _origin_track.emplace_back(track);
-        return _listener ? _listener->addTrack(track) : false;
-    }
-
-    if (_sink->addTrack(track)) {
-        track->addDelegate(std::make_shared<FrameWriterInterfaceHelper>([this](const Frame::Ptr &frame) {
-            return _sink->inputFrame(frame);
-        }));
-        return true;
-    }
-    return false;
-}
-
-void Demuxer::addTrackCompleted() {
-    if (_sink) {
-        _sink->addTrackCompleted();
-    } else if (_listener) {
-        _listener->addTrackCompleted();
-    }
-}
-
-void Demuxer::resetTracks() {
-    if (_sink) {
-        _sink->resetTracks();
-    } else if (_listener) {
-        _listener->resetTracks();
-    }
-}
-
-vector<Track::Ptr> Demuxer::getTracks(bool ready) const {
-    if (_sink) {
-        return _sink->getTracks(ready);
-    }
-
-    vector<Track::Ptr> ret;
-    for (auto &track : _origin_track) {
-        if (ready && !track->ready()) {
-            continue;
-        }
-        ret.emplace_back(track);
-    }
-    return ret;
 }
 
 } /* namespace mediakit */

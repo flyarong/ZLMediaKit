@@ -12,7 +12,6 @@
 #include <string>
 #include <iostream>
 #include "Util/MD5.h"
-#include "Util/File.h"
 #include "Util/logger.h"
 #include "Util/onceToken.h"
 #include "Poller/EventPoller.h"
@@ -87,9 +86,9 @@ int main(int argc, char *argv[]) {
                                          for (auto &pr: parser.getHeader()) {
                                              printer << pr.first << ":" << pr.second << "\r\n";
                                          }
-                                         InfoL << "status:" << parser.Url() << "\r\n"
+                                         InfoL << "status:" << parser.status() << "\r\n"
                                                << "header:\r\n" << (printer << endl)
-                                               << "\r\nbody:" << parser.Content();
+                                               << "\r\nbody:" << parser.content();
                                      }
                                  });
 
@@ -123,9 +122,9 @@ int main(int argc, char *argv[]) {
                                           for (auto &pr: parser.getHeader()) {
                                               printer << pr.first << ":" << pr.second << "\r\n";
                                           }
-                                          InfoL << "status:" << parser.Url() << "\r\n"
+                                          InfoL << "status:" << parser.status() << "\r\n"
                                                 << "header:\r\n" << (printer << endl)
-                                                << "\r\nbody:" << parser.Content();
+                                                << "\r\nbody:" << parser.content();
                                       }
                                   });
 
@@ -160,9 +159,9 @@ int main(int argc, char *argv[]) {
                                               for (auto &pr: parser.getHeader()) {
                                                   printer << pr.first << ":" << pr.second << "\r\n";
                                               }
-                                              InfoL << "status:" << parser.Url() << "\r\n"
+                                              InfoL << "status:" << parser.status() << "\r\n"
                                                     << "header:\r\n" << (printer << endl)
-                                                    << "\r\nbody:" << parser.Content();
+                                                    << "\r\nbody:" << parser.content();
                                           }
                                       });
 

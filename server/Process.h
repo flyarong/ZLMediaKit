@@ -11,8 +11,10 @@
 #ifndef ZLMEDIAKIT_PROCESS_H
 #define ZLMEDIAKIT_PROCESS_H
 
-#ifdef _WIN32
+#if defined(_WIN32)
+#if !defined(__MINGW32__)
 typedef int pid_t;
+#endif
 #else
 #include <sys/wait.h>
 #endif // _WIN32
@@ -24,7 +26,7 @@ class Process {
 public:
     Process();
     ~Process();
-    void run(const std::string &cmd, std::string &log_file);
+    void run(const std::string &cmd, std::string log_file);
     void kill(int max_delay,bool force = false);
     bool wait(bool block = true);
     int exit_code();

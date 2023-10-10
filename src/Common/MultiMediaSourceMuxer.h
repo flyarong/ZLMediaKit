@@ -12,8 +12,10 @@
 #define ZLMEDIAKIT_MULTIMEDIASOURCEMUXER_H
 
 #include "Common/Stamp.h"
-#include "Rtp/RtpSender.h"
+#include "Common/MediaSource.h"
+#include "Common/MediaSink.h"
 #include "Record/Recorder.h"
+#include "Rtp/RtpSender.h"
 #include "Record/HlsRecorder.h"
 #include "Record/HlsMediaSource.h"
 #include "Rtsp/RtspMediaSourceMuxer.h"
@@ -23,85 +25,19 @@
 
 namespace mediakit {
 
-class ProtocolOption {
-public:
-    ProtocolOption();
-
-    //是否开启转换为hls
-    bool enable_hls = false;
-    //是否开启MP4录制
-    bool enable_mp4 = false;
-    //是否将mp4录制当做观看者
-    bool mp4_as_player = false;
-    //是否开启转换为rtsp/webrtc
-    bool enable_rtsp = true;
-    //是否开启转换为rtmp/flv
-    bool enable_rtmp = true;
-    //是否开启转换为http-ts/ws-ts
-    bool enable_ts = true;
-    //是否开启转换为http-fmp4/ws-fmp4
-    bool enable_fmp4 = true;
-
-    //转协议是否开启音频
-    bool enable_audio = true;
-    //添加静音音频，在关闭音频时，此开关无效
-    bool add_mute_audio = true;
-
-    //mp4录制保存路径
-    std::string mp4_save_path;
-    //mp4切片大小，单位秒
-    size_t mp4_max_second = 0;
-
-    //hls录制保存路径
-    std::string hls_save_path;
-
-    //断连续推延时，单位毫秒，默认采用配置文件
-    uint32_t continue_push_ms;
-    
-    //时间戳修复这一路流标志位
-    bool modify_stamp;
-
-    template <typename MAP>
-    ProtocolOption(const MAP &allArgs) : ProtocolOption() {
-        #define GET_OPT_VALUE(key) getArgsValue(allArgs, #key, key)
-        GET_OPT_VALUE(enable_hls);
-        GET_OPT_VALUE(enable_mp4);
-        GET_OPT_VALUE(mp4_as_player);
-        GET_OPT_VALUE(enable_rtsp);
-        GET_OPT_VALUE(enable_rtmp);
-        GET_OPT_VALUE(enable_ts);
-        GET_OPT_VALUE(enable_fmp4);
-        GET_OPT_VALUE(enable_audio);
-        GET_OPT_VALUE(add_mute_audio);
-        GET_OPT_VALUE(mp4_save_path);
-        GET_OPT_VALUE(mp4_max_second);
-        GET_OPT_VALUE(hls_save_path);
-        GET_OPT_VALUE(continue_push_ms);
-        GET_OPT_VALUE(modify_stamp);
-    }
-
-private:
-    template <typename MAP, typename KEY, typename TYPE>
-    static void getArgsValue(const MAP &allArgs, const KEY &key, TYPE &value) {
-        auto val = ((MAP &)allArgs)[key];
-        if (!val.empty()) {
-            value = (TYPE)val;
-        }
-    }
-};
-
 class MultiMediaSourceMuxer : public MediaSourceEventInterceptor, public MediaSink, public std::enable_shared_from_this<MultiMediaSourceMuxer>{
 public:
-    typedef std::shared_ptr<MultiMediaSourceMuxer> Ptr;
+    using Ptr = std::shared_ptr<MultiMediaSourceMuxer>;
+    using RingType = toolkit::RingBuffer<Frame::Ptr>;
 
-    class Listener{
+    class Listener {
     public:
         Listener() = default;
         virtual ~Listener() = default;
         virtual void onAllTrackReady() = 0;
     };
 
-    MultiMediaSourceMuxer(const std::string &vhost, const std::string &app, const std::string &stream, float dur_sec = 0.0,const ProtocolOption &option = ProtocolOption());
+    MultiMediaSourceMuxer(const MediaTuple& tuple, float dur_sec = 0.0,const ProtocolOption &option = ProtocolOption());
     ~MultiMediaSourceMuxer() override = default;
 
     /**
@@ -111,7 +47,7 @@ public:
     void setMediaListener(const std::weak_ptr<MediaSourceEvent> &listener);
 
      /**
-      * 随着Track就绪事件监听器
+      * 设置Track就绪事件监听器
       * @param listener 事件监听器
      */
     void setTrackListener(const std::weak_ptr<Listener> &listener);
@@ -190,9 +126,14 @@ public:
      */
     toolkit::EventPoller::Ptr getOwnerPoller(MediaSource &sender) override;
 
-    const std::string& getVhost() const;
-    const std::string& getApp() const;
-    const std::string& getStreamId() const;
+    /**
+     * 获取本对象
+     */
+    std::shared_ptr<MultiMediaSourceMuxer> getMuxer(MediaSource &sender) override;
+
+    const ProtocolOption &getOption() const;
+    const MediaTuple &getMediaTuple() const;
+    std::string shortUrl() const;
 
 protected:
     /////////////////////////////////MediaSink override/////////////////////////////////
@@ -216,28 +157,27 @@ protected:
     bool onTrackFrame(const Frame::Ptr &frame) override;
 
 private:
+    void createGopCacheIfNeed();
+
+private:
     bool _is_enable = false;
-    std::string _vhost;
-    std::string _app;
-    std::string _stream_id;
+    bool _create_in_poller = false;
+    bool _video_key_pos = false;
+    MediaTuple _tuple;
     ProtocolOption _option;
     toolkit::Ticker _last_check;
     Stamp _stamp[2];
     std::weak_ptr<Listener> _track_listener;
-    std::function<std::string()> _get_origin_url;
-#if defined(ENABLE_RTPPROXY)
-    std::unordered_map<std::string, RtpSender::Ptr> _rtp_sender;
-#endif //ENABLE_RTPPROXY
-
-#if defined(ENABLE_MP4)
+    std::unordered_map<std::string, RingType::RingReader::Ptr> _rtp_sender;
     FMP4MediaSourceMuxer::Ptr _fmp4;
-#endif
     RtmpMediaSourceMuxer::Ptr _rtmp;
     RtspMediaSourceMuxer::Ptr _rtsp;
     TSMediaSourceMuxer::Ptr _ts;
     MediaSinkInterface::Ptr _mp4;
     HlsRecorder::Ptr _hls;
+    HlsFMP4Recorder::Ptr _hls_fmp4;
     toolkit::EventPoller::Ptr _poller;
+    RingType::Ptr _ring;
 
     //对象个数统计
     toolkit::ObjectStatistic<MultiMediaSourceMuxer> _statistic;

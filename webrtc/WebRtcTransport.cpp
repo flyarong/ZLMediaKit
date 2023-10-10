@@ -10,16 +10,20 @@
 
 #include <iostream>
 #include <srtp2/srtp.h>
-
+#include "Common/config.h"
 #include "RtpExt.h"
 #include "Rtcp/Rtcp.h"
 #include "Rtcp/RtcpFCI.h"
+#include "Rtcp/RtcpContext.h"
+#include "Rtsp/Rtsp.h"
 #include "Rtsp/RtpReceiver.h"
 #include "WebRtcTransport.h"
 
 #include "WebRtcEchoTest.h"
 #include "WebRtcPlayer.h"
 #include "WebRtcPusher.h"
+
+#include "Rtsp/RtspMediaSourceImp.h"
 
 #define RTP_SSRC_OFFSET 1
 #define RTX_SSRC_OFFSET 2
@@ -44,11 +48,14 @@ const string kRembBitRate = RTC_FIELD "rembBitRate";
 // webrtc单端口udp服务器
 const string kPort = RTC_FIELD "port";
 
+const string kTcpPort = RTC_FIELD "tcpPort";
+
 static onceToken token([]() {
     mINI::Instance()[kTimeOutSec] = 15;
     mINI::Instance()[kExternIP] = "";
     mINI::Instance()[kRembBitRate] = 0;
-    mINI::Instance()[kPort] = 8000;
+    mINI::Instance()[kPort] = 0;
+    mINI::Instance()[kTcpPort] = 0;
 });
 
 } // namespace RTC
@@ -68,6 +75,17 @@ static void translateIPFromEnv(std::vector<std::string> &v) {
             ++iter;
         }
     }
+}
+
+const char* sockTypeStr(Session* session) {
+    if (session) {
+        switch (session->getSock()->sockType()) {
+            case SockNum::Sock_TCP: return "tcp";
+            case SockNum::Sock_UDP: return "udp";
+            default: break;
+        }
+    }
+    return "unknown";
 }
 
 WebRtcTransport::WebRtcTransport(const EventPoller::Ptr &poller) {
@@ -97,6 +115,13 @@ const string &WebRtcTransport::getIdentifier() const {
     return _identifier;
 }
 
+const std::string& WebRtcTransport::deleteRandStr() const {
+    if (_delete_rand_str.empty()) {
+        _delete_rand_str = makeRandStr(32);
+    }
+    return _delete_rand_str;
+}
+
 //////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
 void WebRtcTransport::OnIceServerSendStunPacket(
@@ -104,16 +129,18 @@ void WebRtcTransport::OnIceServerSendStunPacket(
     sendSockData((char *)packet->GetData(), packet->GetSize(), tuple);
 }
 
-void WebRtcTransport::OnIceServerSelectedTuple(const RTC::IceServer *iceServer, RTC::TransportTuple *tuple) {
-    InfoL;
+void WebRtcTransportImp::OnIceServerSelectedTuple(const RTC::IceServer *iceServer, RTC::TransportTuple *tuple) {
+    InfoL << getIdentifier() << " select tuple " << sockTypeStr(tuple) << " " << tuple->get_peer_ip() << ":" << tuple->get_peer_port();
+    tuple->setSendFlushFlag(false);
+    unrefSelf();
 }
 
 void WebRtcTransport::OnIceServerConnected(const RTC::IceServer *iceServer) {
-    InfoL;
+    InfoL << getIdentifier();
 }
 
 void WebRtcTransport::OnIceServerCompleted(const RTC::IceServer *iceServer) {
-    InfoL;
+    InfoL << getIdentifier();
     if (_answer_sdp->media[0].role == DtlsRole::passive) {
         _dtls_transport->Run(RTC::DtlsTransport::Role::SERVER);
     } else {
@@ -122,7 +149,7 @@ void WebRtcTransport::OnIceServerCompleted(const RTC::IceServer *iceServer) {
 }
 
 void WebRtcTransport::OnIceServerDisconnected(const RTC::IceServer *iceServer) {
-    InfoL;
+    InfoL << getIdentifier();
 }
 
 //////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -130,7 +157,7 @@ void WebRtcTransport::OnIceServerDisconnected(const RTC::IceServer *iceServer) {
 void WebRtcTransport::OnDtlsTransportConnected(
     const RTC::DtlsTransport *dtlsTransport, RTC::SrtpSession::CryptoSuite srtpCryptoSuite, uint8_t *srtpLocalKey,
     size_t srtpLocalKeyLen, uint8_t *srtpRemoteKey, size_t srtpRemoteKeyLen, std::string &remoteCert) {
-    InfoL;
+    InfoL << getIdentifier();
     _srtp_session_send = std::make_shared<RTC::SrtpSession>(
         RTC::SrtpSession::Type::OUTBOUND, srtpCryptoSuite, srtpLocalKey, srtpLocalKeyLen);
     _srtp_session_recv = std::make_shared<RTC::SrtpSession>(
@@ -148,16 +175,16 @@ void WebRtcTransport::OnDtlsTransportSendData(
 }
 
 void WebRtcTransport::OnDtlsTransportConnecting(const RTC::DtlsTransport *dtlsTransport) {
-    InfoL;
+    InfoL << getIdentifier();
 }
 
 void WebRtcTransport::OnDtlsTransportFailed(const RTC::DtlsTransport *dtlsTransport) {
-    InfoL;
+    InfoL << getIdentifier();
     onShutdown(SockException(Err_shutdown, "dtls transport failed"));
 }
 
 void WebRtcTransport::OnDtlsTransportClosed(const RTC::DtlsTransport *dtlsTransport) {
-    InfoL;
+    InfoL << getIdentifier();
     onShutdown(SockException(Err_shutdown, "dtls close notify received"));
 }
 
@@ -173,7 +200,7 @@ void WebRtcTransport::OnDtlsTransportApplicationDataReceived(
 //////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 #ifdef ENABLE_SCTP
 void WebRtcTransport::OnSctpAssociationConnecting(RTC::SctpAssociation *sctpAssociation) {
-    TraceL;
+    TraceL << getIdentifier();
 }
 
 void WebRtcTransport::OnSctpAssociationConnected(RTC::SctpAssociation *sctpAssociation) {
@@ -202,6 +229,19 @@ void WebRtcTransport::OnSctpAssociationMessageReceived(
     _sctp->SendSctpMessage(params, ppid, msg, len);
 }
 #endif
+
+void WebRtcTransport::sendDatachannel(uint16_t streamId, uint32_t ppid, const char *msg, size_t len) {
+#ifdef ENABLE_SCTP
+    if (_sctp) {
+        RTC::SctpStreamParameters params;
+        params.streamId = streamId;
+        _sctp->SendSctpMessage(params, ppid, (uint8_t *)msg, len);
+    }
+#else
+    WarnL << "WebRTC datachannel disabled!";
+#endif
+}
+
 //////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
 void WebRtcTransport::sendSockData(const char *buf, size_t len, RTC::TransportTuple *tuple) {
@@ -210,8 +250,9 @@ void WebRtcTransport::sendSockData(const char *buf, size_t len, RTC::TransportTu
     onSendSockData(std::move(pkt), true, tuple ? tuple : _ice_server->GetSelectedTuple());
 }
 
-RTC::TransportTuple *WebRtcTransport::getSelectedTuple() const {
-    return _ice_server->GetSelectedTuple();
+Session::Ptr WebRtcTransport::getSession() const {
+    auto tuple = _ice_server->GetSelectedTuple(true);
+    return tuple ? static_pointer_cast<Session>(tuple->shared_from_this()) : nullptr;
 }
 
 void WebRtcTransport::sendRtcpRemb(uint32_t ssrc, size_t bit_rate) {
@@ -283,39 +324,29 @@ std::string WebRtcTransport::getAnswerSdp(const string &offer) {
     }
 }
 
-static bool is_dtls(char *buf) {
+static bool isDtls(char *buf) {
     return ((*buf > 19) && (*buf < 64));
 }
 
-static bool is_rtp(char *buf) {
-    RtpHeader *header = (RtpHeader *)buf;
-    return ((header->pt < 64) || (header->pt >= 96));
-}
-
-static bool is_rtcp(char *buf) {
-    RtpHeader *header = (RtpHeader *)buf;
-    return ((header->pt >= 64) && (header->pt < 96));
-}
-
 static string getPeerAddress(RTC::TransportTuple *tuple) {
-    return SockUtil::inet_ntoa(tuple);
+    return tuple->get_peer_ip();
 }
 
 void WebRtcTransport::inputSockData(char *buf, int len, RTC::TransportTuple *tuple) {
     if (RTC::StunPacket::IsStun((const uint8_t *)buf, len)) {
         std::unique_ptr<RTC::StunPacket> packet(RTC::StunPacket::Parse((const uint8_t *)buf, len));
         if (!packet) {
-            WarnL << "parse stun error" << std::endl;
+            WarnL << "parse stun error";
             return;
         }
         _ice_server->ProcessStunPacket(packet.get(), tuple);
         return;
     }
-    if (is_dtls(buf)) {
+    if (isDtls(buf)) {
         _dtls_transport->ProcessDtlsData((uint8_t *)buf, len);
         return;
     }
-    if (is_rtp(buf)) {
+    if (isRtp(buf, len)) {
         if (!_srtp_session_recv) {
             WarnL << "received rtp packet when dtls not completed from:" << getPeerAddress(tuple);
             return;
@@ -325,7 +356,7 @@ void WebRtcTransport::inputSockData(char *buf, int len, RTC::TransportTuple *tup
         }
         return;
     }
-    if (is_rtcp(buf)) {
+    if (isRtcp(buf, len)) {
         if (!_srtp_session_recv) {
             WarnL << "received rtcp packet when dtls not completed from:" << getPeerAddress(tuple);
             return;
@@ -342,7 +373,7 @@ void WebRtcTransport::sendRtpPacket(const char *buf, int len, bool flush, void *
         auto pkt = _packet_pool.obtain2();
         // 预留rtx加入的两个字节
         pkt->setCapacity((size_t)len + SRTP_MAX_TRAILER_LEN + 2);
-        pkt->assign(buf, len);
+        memcpy(pkt->data(), buf, len);
         onBeforeEncryptRtp(pkt->data(), len, ctx);
         if (_srtp_session_send->EncryptRtp(reinterpret_cast<uint8_t *>(pkt->data()), &len)) {
             pkt->setSize(len);
@@ -356,7 +387,7 @@ void WebRtcTransport::sendRtcpPacket(const char *buf, int len, bool flush, void 
         auto pkt = _packet_pool.obtain2();
         // 预留rtx加入的两个字节
         pkt->setCapacity((size_t)len + SRTP_MAX_TRAILER_LEN + 2);
-        pkt->assign(buf, len);
+        memcpy(pkt->data(), buf, len);
         onBeforeEncryptRtcp(pkt->data(), len, ctx);
         if (_srtp_session_send->EncryptRtcp(reinterpret_cast<uint8_t *>(pkt->data()), &len)) {
             pkt->setSize(len);
@@ -399,8 +430,8 @@ void WebRtcTransportImp::OnDtlsTransportApplicationDataReceived(const RTC::DtlsT
 #endif
 }
 
-WebRtcTransportImp::WebRtcTransportImp(const EventPoller::Ptr &poller)
-    : WebRtcTransport(poller) {
+WebRtcTransportImp::WebRtcTransportImp(const EventPoller::Ptr &poller,bool preferred_tcp)
+    : WebRtcTransport(poller), _preferred_tcp(preferred_tcp) {
     InfoL << getIdentifier();
 }
 
@@ -414,13 +445,28 @@ void WebRtcTransportImp::onDestory() {
 }
 
 void WebRtcTransportImp::onSendSockData(Buffer::Ptr buf, bool flush, RTC::TransportTuple *tuple) {
-    if (!_selected_session) {
-        WarnL << "send data failed:" << buf->size();
-        return;
+    if (tuple == nullptr) {
+        tuple = _ice_server->GetSelectedTuple();
+        if (!tuple) {
+            WarnL << "send data failed:" << buf->size();
+            return;
+        }
     }
+
     // 一次性发送一帧的rtp数据，提高网络io性能
-    _selected_session->setSendFlushFlag(flush);
-    _selected_session->send(std::move(buf));
+    if (tuple->getSock()->sockType() == SockNum::Sock_TCP) {
+        // 增加tcp两字节头
+        auto len = buf->size();
+        char tcp_len[2] = { 0 };
+        tcp_len[0] = (len >> 8) & 0xff;
+        tcp_len[1] = len & 0xff;
+        tuple->SockSender::send(tcp_len, 2);
+    }
+    tuple->send(std::move(buf));
+
+    if (flush) {
+        tuple->flushAll();
+    }
 }
 
 ///////////////////////////////////////////////////////////////////
@@ -482,7 +528,7 @@ void WebRtcTransportImp::onStartWebRTC() {
             _pt_to_track.emplace(track->plan_rtx->pt, std::unique_ptr<WrappedMediaTrack>(new WrappedRtxTrack(track)));
         }
         // 记录rtp ext类型与id的关系，方便接收或发送rtp时修改rtp ext id
-        track->rtp_ext_ctx = std::make_shared<RtpExtContext>(*m_offer);
+        track->rtp_ext_ctx = std::make_shared<RtpExtContext>(m_answer);
         weak_ptr<MediaTrack> weak_track = track;
         track->rtp_ext_ctx->setOnGetRtp([this, weak_track](uint8_t pt, uint32_t ssrc, const string &rid) {
             // ssrc --> MediaTrack
@@ -529,9 +575,12 @@ void WebRtcTransportImp::onCheckAnswer(RtcSession &sdp) {
         m.rtcp_addr.reset();
         m.rtcp_addr.address = m.addr.address;
 
-        GET_CONFIG(uint16_t, local_port, Rtc::kPort);
-        m.rtcp_addr.port = local_port;
-        m.port = m.rtcp_addr.port;
+        GET_CONFIG(uint16_t, udp_port, Rtc::kPort);
+        GET_CONFIG(uint16_t, tcp_port, Rtc::kTcpPort);
+        m.port = m.port ? (udp_port ? udp_port : tcp_port) : 0;
+        if (m.type != TrackApplication) {
+            m.rtcp_addr.port = m.port;
+        }
         sdp.origin.address = m.addr.address;
     }
 
@@ -590,13 +639,17 @@ makeIceCandidate(std::string ip, uint16_t port, uint32_t priority = 100, std::st
     candidate->address = ip;
     candidate->port = port;
     candidate->type = "host";
+    if (proto == "tcp") {
+        candidate->type += " tcptype passive";
+    }
     return candidate;
 }
 
 void WebRtcTransportImp::onRtcConfigure(RtcConfigure &configure) const {
     WebRtcTransport::onRtcConfigure(configure);
 
-    GET_CONFIG(uint16_t, local_port, Rtc::kPort);
+    GET_CONFIG(uint16_t, local_udp_port, Rtc::kPort);
+    GET_CONFIG(uint16_t, local_tcp_port, Rtc::kTcpPort);
     // 添加接收端口candidate信息
     GET_CONFIG_FUNC(std::vector<std::string>, extern_ips, Rtc::kExternIP, [](string str) {
         std::vector<std::string> ret;
@@ -607,13 +660,15 @@ void WebRtcTransportImp::onRtcConfigure(RtcConfigure &configure) const {
         return ret;
     });
     if (extern_ips.empty()) {
-        std::string localIp = SockUtil::get_local_ip();
-        configure.addCandidate(*makeIceCandidate(localIp, local_port, 120, "udp"));
+        std::string local_ip = SockUtil::get_local_ip();
+        if (local_udp_port) { configure.addCandidate(*makeIceCandidate(local_ip, local_udp_port, 120, "udp")); }
+        if (local_tcp_port) { configure.addCandidate(*makeIceCandidate(local_ip, local_tcp_port, _preferred_tcp ? 125 : 115, "tcp")); }
     } else {
         const uint32_t delta = 10;
         uint32_t priority = 100 + delta * extern_ips.size();
         for (auto ip : extern_ips) {
-            configure.addCandidate(*makeIceCandidate(ip, local_port, priority, "udp"));
+            if (local_udp_port) { configure.addCandidate(*makeIceCandidate(ip, local_udp_port, priority, "udp")); }
+            if (local_tcp_port) { configure.addCandidate(*makeIceCandidate(ip, local_tcp_port, priority - (_preferred_tcp ? -5 : 5), "tcp")); }
             priority -= delta;
         }
     }
@@ -621,15 +676,14 @@ void WebRtcTransportImp::onRtcConfigure(RtcConfigure &configure) const {
 
 ///////////////////////////////////////////////////////////////////
 
-class RtpChannel
-    : public RtpTrackImp
-    , public std::enable_shared_from_this<RtpChannel> {
+class RtpChannel : public RtpTrackImp, public std::enable_shared_from_this<RtpChannel> {
 public:
     RtpChannel(EventPoller::Ptr poller, RtpTrackImp::OnSorted cb, function<void(const FCI_NACK &nack)> on_nack) {
         _poller = std::move(poller);
         _on_nack = std::move(on_nack);
         setOnSorted(std::move(cb));
-
+        //设置jitter buffer参数
+        RtpTrackImp::setParams(1024, NackContext::kNackMaxMS, 512);
         _nack_ctx.setOnNack([this](const FCI_NACK &nack) { onNack(nack); });
     }
 
@@ -659,7 +713,7 @@ public:
         if (!expected) {
             return -1;
         }
-        return _rtcp_context.geLostInterval() * 100 / expected;
+        return _rtcp_context.getLostInterval() * 100 / expected;
     }
 
 private:
@@ -772,7 +826,7 @@ void WebRtcTransportImp::onRtcp(const char *buf, size_t len) {
                 _ssrc_to_track.erase(it);
             }
             onRtcpBye();
-            onShutdown(SockException(Err_eof, "rtcp bye message received"));
+            // bye 会在 sender audio track mute 时出现, 因此不能作为 shutdown 的依据
             break;
         }
         case RtcpType::RTCP_PSFB:
@@ -830,7 +884,7 @@ void WebRtcTransportImp::onRtcp(const char *buf, size_t len) {
 void WebRtcTransportImp::createRtpChannel(const string &rid, uint32_t ssrc, MediaTrack &track) {
     // rid --> RtpReceiverImp
     auto &ref = track.rtp_channel[rid];
-    weak_ptr<WebRtcTransportImp> weak_self = dynamic_pointer_cast<WebRtcTransportImp>(shared_from_this());
+    weak_ptr<WebRtcTransportImp> weak_self = static_pointer_cast<WebRtcTransportImp>(shared_from_this());
     ref = std::make_shared<RtpChannel>(
         getPoller(), [&track, this, rid](RtpPacket::Ptr rtp) mutable { onSortedRtp(track, rid, std::move(rtp)); },
         [&track, weak_self, ssrc](const FCI_NACK &nack) mutable {
@@ -1023,30 +1077,26 @@ void WebRtcTransportImp::onBeforeEncryptRtp(const char *buf, int &len, void *ctx
     }
 }
 
-void WebRtcTransportImp::onShutdown(const SockException &ex) {
-    WarnL << ex.what();
-    unrefSelf();
-    for (auto &pr : _history_sessions) {
-        auto session = pr.second.lock();
-        if (session) {
-            session->shutdown(ex);
+void WebRtcTransportImp::safeShutdown(const SockException &ex) {
+    std::weak_ptr<WebRtcTransportImp> weak_self = static_pointer_cast<WebRtcTransportImp>(shared_from_this());
+    getPoller()->async([ex, weak_self]() {
+        if (auto strong_self = weak_self.lock()) {
+            strong_self->onShutdown(ex);
         }
-    }
+    });
 }
 
-void WebRtcTransportImp::setSession(Session::Ptr session) {
-    _history_sessions.emplace(session.get(), session);
-    if (_selected_session) {
-        InfoL << "rtc network changed: " << _selected_session->get_peer_ip() << ":"
-              << _selected_session->get_peer_port() << " -> " << session->get_peer_ip() << ":"
-              << session->get_peer_port() << ", id:" << getIdentifier();
-    }
-    _selected_session = std::move(session);
+void WebRtcTransportImp::onShutdown(const SockException &ex) {
+    WarnL << ex;
     unrefSelf();
+    for (auto &tuple : _ice_server->GetTuples()) {
+        tuple->shutdown(ex);
+    }
 }
 
-const Session::Ptr &WebRtcTransportImp::getSession() const {
-    return _selected_session;
+void WebRtcTransportImp::removeTuple(RTC::TransportTuple *tuple) {
+    InfoL << getIdentifier() << " remove tuple " << tuple->get_peer_ip() << ":" << tuple->get_peer_port();
+    this->_ice_server->RemoveTuple(tuple);
 }
 
 uint64_t WebRtcTransportImp::getBytesUsage() const {
@@ -1114,27 +1164,29 @@ void WebRtcPluginManager::registerPlugin(const string &type, Plugin cb) {
     _map_creator[type] = std::move(cb);
 }
 
-void WebRtcPluginManager::getAnswerSdp(
-    Session &sender, const string &type, const string &offer, const WebRtcArgs &args, const onCreateRtc &cb) {
+std::string exchangeSdp(const WebRtcInterface &exchanger, const std::string& offer) {
+    return const_cast<WebRtcInterface &>(exchanger).getAnswerSdp(offer);
+}
+
+void WebRtcPluginManager::getAnswerSdp(Session &sender, const string &type, const WebRtcArgs &args, const onCreateRtc &cb) {
     lock_guard<mutex> lck(_mtx_creator);
     auto it = _map_creator.find(type);
     if (it == _map_creator.end()) {
         cb(WebRtcException(SockException(Err_other, "the type can not supported")));
         return;
     }
-    it->second(sender, offer, args, cb);
+    it->second(sender, args, cb);
 }
 
-void echo_plugin(
-    Session &sender, const string &offer, const WebRtcArgs &args, const WebRtcPluginManager::onCreateRtc &cb) {
+void echo_plugin(Session &sender, const WebRtcArgs &args, const WebRtcPluginManager::onCreateRtc &cb) {
     cb(*WebRtcEchoTest::create(EventPollerPool::Instance().getPoller()));
 }
 
-void push_plugin(
-    Session &sender, const string &offer_sdp, const WebRtcArgs &args, const WebRtcPluginManager::onCreateRtc &cb) {
+void push_plugin(Session &sender, const WebRtcArgs &args, const WebRtcPluginManager::onCreateRtc &cb) {
     MediaInfo info(args["url"]);
-    Broadcast::PublishAuthInvoker invoker = [cb, offer_sdp,
-                                             info](const string &err, const ProtocolOption &option) mutable {
+    bool preferred_tcp = args["preferred_tcp"];
+
+    Broadcast::PublishAuthInvoker invoker = [cb, info, preferred_tcp](const string &err, const ProtocolOption &option) mutable {
         if (!err.empty()) {
             cb(WebRtcException(SockException(Err_other, err)));
             return;
@@ -1142,7 +1194,7 @@ void push_plugin(
 
         RtspMediaSourceImp::Ptr push_src;
         std::shared_ptr<void> push_src_ownership;
-        auto src = MediaSource::find(RTSP_SCHEMA, info._vhost, info._app, info._streamid);
+        auto src = MediaSource::find(RTSP_SCHEMA, info.vhost, info.app, info.stream);
         auto push_failed = (bool)src;
 
         while (src) {
@@ -1169,37 +1221,36 @@ void push_plugin(
         }
 
         if (!push_src) {
-            push_src = std::make_shared<RtspMediaSourceImp>(info._vhost, info._app, info._streamid);
+            push_src = std::make_shared<RtspMediaSourceImp>(info);
             push_src_ownership = push_src->getOwnership();
             push_src->setProtocolOption(option);
         }
-        auto rtc
-            = WebRtcPusher::create(EventPollerPool::Instance().getPoller(), push_src, push_src_ownership, info, option);
+        auto rtc = WebRtcPusher::create(EventPollerPool::Instance().getPoller(), push_src, push_src_ownership, info, option, preferred_tcp);
         push_src->setListener(rtc);
         cb(*rtc);
     };
 
     // rtsp推流需要鉴权
-    auto flag = NoticeCenter::Instance().emitEvent(
-        Broadcast::kBroadcastMediaPublish, MediaOriginType::rtc_push, info, invoker, static_cast<SockInfo &>(sender));
+    auto flag = NOTICE_EMIT(BroadcastMediaPublishArgs, Broadcast::kBroadcastMediaPublish, MediaOriginType::rtc_push, info, invoker, sender);
     if (!flag) {
         // 该事件无人监听,默认不鉴权
         invoker("", ProtocolOption());
     }
 }
 
-void play_plugin(
-    Session &sender, const string &offer_sdp, const WebRtcArgs &args, const WebRtcPluginManager::onCreateRtc &cb) {
+void play_plugin(Session &sender, const WebRtcArgs &args, const WebRtcPluginManager::onCreateRtc &cb) {
     MediaInfo info(args["url"]);
-    auto session_ptr = sender.shared_from_this();
-    Broadcast::AuthInvoker invoker = [cb, offer_sdp, info, session_ptr](const string &err) mutable {
+    bool preferred_tcp = args["preferred_tcp"];
+
+    auto session_ptr = static_pointer_cast<Session>(sender.shared_from_this());
+    Broadcast::AuthInvoker invoker = [cb, info, session_ptr, preferred_tcp](const string &err) mutable {
         if (!err.empty()) {
             cb(WebRtcException(SockException(Err_other, err)));
             return;
         }
 
         // webrtc播放的是rtsp的源
-        info._schema = RTSP_SCHEMA;
+        info.schema = RTSP_SCHEMA;
         MediaSource::findAsync(info, session_ptr, [=](const MediaSource::Ptr &src_in) mutable {
             auto src = dynamic_pointer_cast<RtspMediaSource>(src_in);
             if (!src) {
@@ -1207,15 +1258,14 @@ void play_plugin(
                 return;
             }
             // 还原成rtc，目的是为了hook时识别哪种播放协议
-            info._schema = RTC_SCHEMA;
-            auto rtc = WebRtcPlayer::create(EventPollerPool::Instance().getPoller(), src, info);
+            info.schema = RTC_SCHEMA;
+            auto rtc = WebRtcPlayer::create(EventPollerPool::Instance().getPoller(), src, info, preferred_tcp);
             cb(*rtc);
         });
     };
 
     // 广播通用播放url鉴权事件
-    auto flag = NoticeCenter::Instance().emitEvent(
-        Broadcast::kBroadcastMediaPlayed, info, invoker, static_cast<SockInfo &>(sender));
+    auto flag = NOTICE_EMIT(BroadcastMediaPlayedArgs, Broadcast::kBroadcastMediaPlayed, info, invoker, sender);
     if (!flag) {
         // 该事件无人监听,默认不鉴权
         invoker("");

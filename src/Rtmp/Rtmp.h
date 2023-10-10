@@ -14,19 +14,9 @@
 #include <memory>
 #include <string>
 #include <cstdlib>
-#include "Util/util.h"
-#include "Util/logger.h"
-#include "Network/Buffer.h"
-#include "Network/sockutil.h"
 #include "amf.h"
+#include "Network/Buffer.h"
 #include "Extension/Track.h"
-
-#if !defined(_WIN32)
-#define PACKED	__attribute__((packed))
-#else
-#define PACKED
-#endif //!defined(_WIN32)
-
 
 #define DEFAULT_CHUNK_LEN	128
 #define HANDSHAKE_PLAINTEXT	0x03
@@ -66,54 +56,23 @@
 #define CHUNK_AUDIO						6 /*音频chunkID*/
 #define CHUNK_VIDEO						7 /*视频chunkID*/
 
-#define FLV_KEY_FRAME				1
-#define FLV_INTER_FRAME				2
-
-#define FLV_CODEC_AAC 10
-#define FLV_CODEC_H264 7
-//金山扩展: https://github.com/ksvc/FFmpeg/wiki
-#define FLV_CODEC_H265 12
-#define FLV_CODEC_G711A 7
-#define FLV_CODEC_G711U 8
-//参考学而思网校: https://github.com/notedit/rtmp/commit/6e314ac5b29611431f8fb5468596b05815743c10
-#define FLV_CODEC_OPUS 13
-
 namespace mediakit {
 
-#if defined(_WIN32)
 #pragma pack(push, 1)
-#endif // defined(_WIN32)
 
 class RtmpHandshake {
 public:
-    RtmpHandshake(uint32_t _time, uint8_t *_random = nullptr) {
-        _time = htonl(_time);
-        memcpy(time_stamp, &_time, 4);
-        if (!_random) {
-            random_generate((char *) random, sizeof(random));
-        } else {
-            memcpy(random, _random, sizeof(random));
-        }
-    }
+    RtmpHandshake(uint32_t _time, uint8_t *_random = nullptr);
 
     uint8_t time_stamp[4];
     uint8_t zero[4] = {0};
     uint8_t random[RANDOM_LEN];
 
-    void random_generate(char *bytes, int size) {
-        static char cdata[] = {0x73, 0x69, 0x6d, 0x70, 0x6c, 0x65, 0x2d, 0x72,
-                               0x74, 0x6d, 0x70, 0x2d, 0x73, 0x65, 0x72, 0x76, 0x65, 0x72,
-                               0x2d, 0x77, 0x69, 0x6e, 0x6c, 0x69, 0x6e, 0x2d, 0x77, 0x69,
-                               0x6e, 0x74, 0x65, 0x72, 0x73, 0x65, 0x72, 0x76, 0x65, 0x72,
-                               0x40, 0x31, 0x32, 0x36, 0x2e, 0x63, 0x6f, 0x6d};
-        for (int i = 0; i < size; i++) {
-            bytes[i] = cdata[rand() % (sizeof(cdata) - 1)];
-        }
-    }
+    void random_generate(char *bytes, int size);
 
     void create_complex_c0c1();
 
-}PACKED;
+};
 
 class RtmpHeader {
 public:
@@ -129,10 +88,12 @@ public:
     uint8_t body_size[3];
     uint8_t type_id;
     uint8_t stream_index[4]; /* Note, this is little-endian while others are BE */
-}PACKED;
+};
 
 class FLVHeader {
 public:
+    static constexpr uint8_t kFlvVersion = 1;
+    static constexpr uint8_t kFlvHeaderLength = 9;
     //FLV
     char flv[3];
     //File version (for example, 0x01 for FLV version 1)
@@ -158,7 +119,9 @@ public:
 #endif
     //The length of this header in bytes,固定为9
     uint32_t length;
-} PACKED;
+    //固定为0
+    uint32_t previous_tag_size0;
+};
 
 class RtmpTagHeader {
 public:
@@ -167,11 +130,9 @@ public:
     uint8_t timestamp[3] = {0};
     uint8_t timestamp_ex = 0;
     uint8_t streamid[3] = {0}; /* Always 0. */
-} PACKED;
+};
 
-#if defined(_WIN32)
 #pragma pack(pop)
-#endif // defined(_WIN32)
 
 class RtmpPacket : public toolkit::Buffer{
 public:
@@ -196,65 +157,20 @@ public:
         return buffer.size();
     }
 
-    void clear(){
-        is_abs_stamp = false;
-        time_stamp = 0;
-        ts_field = 0;
-        body_size = 0;
-        buffer.clear();
-    }
+    void clear();
 
-    bool isVideoKeyFrame() const {
-        return type_id == MSG_VIDEO && (uint8_t) buffer[0] >> 4 == FLV_KEY_FRAME && (uint8_t) buffer[1] == 1;
-    }
+    // video config frame和key frame都返回true
+    // 用于gop缓存定位
+    bool isVideoKeyFrame() const;
 
-    bool isCfgFrame() const {
-        switch (type_id){
-            case MSG_VIDEO : return buffer[1] == 0;
-            case MSG_AUDIO : {
-                switch (getMediaType()){
-                    case FLV_CODEC_AAC : return buffer[1] == 0;
-                    default : return false;
-                }
-            }
-            default : return false;
-        }
-    }
+    // aac config或h264/h265 config返回true，支持增强型rtmp
+    // 用于缓存解码配置信息
+    bool isConfigFrame() const;
 
-    int getMediaType() const {
-        switch (type_id) {
-            case MSG_VIDEO : return (uint8_t) buffer[0] & 0x0F;
-            case MSG_AUDIO : return (uint8_t) buffer[0] >> 4;
-            default : return 0;
-        }
-    }
-
-    int getAudioSampleRate() const {
-        if (type_id != MSG_AUDIO) {
-            return 0;
-        }
-        int flvSampleRate = ((uint8_t) buffer[0] & 0x0C) >> 2;
-        const static int sampleRate[] = { 5512, 11025, 22050, 44100 };
-        return sampleRate[flvSampleRate];
-    }
-
-    int getAudioSampleBit() const {
-        if (type_id != MSG_AUDIO) {
-            return 0;
-        }
-        int flvSampleBit = ((uint8_t) buffer[0] & 0x02) >> 1;
-        const static int sampleBit[] = { 8, 16 };
-        return sampleBit[flvSampleBit];
-    }
-
-    int getAudioChannel() const {
-        if (type_id != MSG_AUDIO) {
-            return 0;
-        }
-        int flvStereoOrMono = (uint8_t) buffer[0] & 0x01;
-        const static int channel[] = { 1, 2 };
-        return channel[flvStereoOrMono];
-    }
+    int getRtmpCodecId() const;
+    int getAudioSampleRate() const;
+    int getAudioSampleBit() const;
+    int getAudioChannel() const;
 
 private:
     friend class toolkit::ResourcePool_l<RtmpPacket>;
@@ -262,15 +178,7 @@ private:
         clear();
     }
 
-    RtmpPacket &operator=(const RtmpPacket &that) {
-        is_abs_stamp = that.is_abs_stamp;
-        stream_index = that.stream_index;
-        body_size = that.body_size;
-        type_id = that.type_id;
-        ts_field = that.ts_field;
-        time_stamp = that.time_stamp;
-        return *this;
-    }
+    RtmpPacket &operator=(const RtmpPacket &that);
 
 private:
     //对象个数统计
@@ -282,10 +190,10 @@ private:
  */
 class Metadata : public CodecInfo{
 public:
-    typedef std::shared_ptr<Metadata> Ptr;
+    using Ptr = std::shared_ptr<Metadata>;
 
-    Metadata():_metadata(AMF_OBJECT){}
-    virtual ~Metadata(){}
+    Metadata(): _metadata(AMF_OBJECT) {}
+    virtual ~Metadata() = default;
     const AMFValue &getMetadata() const{
         return _metadata;
     }
@@ -300,18 +208,11 @@ protected:
 */
 class TitleMeta : public Metadata{
 public:
-    typedef std::shared_ptr<TitleMeta> Ptr;
+    using Ptr = std::shared_ptr<TitleMeta>;
 
     TitleMeta(float dur_sec = 0,
               size_t fileSize = 0,
-              const std::map<std::string, std::string> &header = std::map<std::string, std::string>()){
-        _metadata.set("duration", dur_sec);
-        _metadata.set("fileSize", (int)fileSize);
-        _metadata.set("server",kServerName);
-        for (auto &pr : header){
-            _metadata.set(pr.first, pr.second);
-        }
-    }
+              const std::map<std::string, std::string> &header = std::map<std::string, std::string>());
 
     CodecId getCodecId() const override{
         return CodecInvalid;
@@ -320,10 +221,10 @@ public:
 
 class VideoMeta : public Metadata{
 public:
-    typedef std::shared_ptr<VideoMeta> Ptr;
+    using Ptr = std::shared_ptr<VideoMeta>;
 
     VideoMeta(const VideoTrack::Ptr &video);
-    virtual ~VideoMeta(){}
+    virtual ~VideoMeta() = default;
 
     CodecId getCodecId() const override{
         return _codecId;
@@ -334,11 +235,10 @@ private:
 
 class AudioMeta : public Metadata{
 public:
-    typedef std::shared_ptr<AudioMeta> Ptr;
+    using Ptr = std::shared_ptr<AudioMeta>;
 
     AudioMeta(const AudioTrack::Ptr &audio);
-
-    virtual ~AudioMeta(){}
+    virtual ~AudioMeta() = default;
 
     CodecId getCodecId() const override{
         return _codecId;
@@ -349,6 +249,122 @@ private:
 
 //根据音频track获取flags
 uint8_t getAudioRtmpFlags(const Track::Ptr &track);
+
+////////////////// rtmp video //////////////////////////
+//https://rtmp.veriskope.com/pdf/video_file_format_spec_v10_1.pdf
+
+// UB [4]; Type of video frame.
+enum class RtmpFrameType : uint8_t {
+    reserved = 0,
+    key_frame = 1, // key frame (for AVC, a seekable frame)
+    inter_frame = 2, // inter frame (for AVC, a non-seekable frame)
+    disposable_inter_frame = 3, // disposable inter frame (H.263 only)
+    generated_key_frame = 4, // generated key frame (reserved for server use only)
+    video_info_frame = 5, // video info/command frame
+};
+
+#define MKBETAG(a, b, c, d) ((d) | ((c) << 8) | ((b) << 16) | ((unsigned)(a) << 24))
+
+// UB [4]; Codec Identifier.
+enum class RtmpVideoCodec : uint32_t {
+    h263 = 2, // Sorenson H.263
+    screen_video = 3, // Screen video
+    vp6 = 4, // On2 VP6
+    vp6_alpha = 5, // On2 VP6 with alpha channel
+    screen_video2 = 6, // Screen video version 2
+    h264 = 7, // avc
+    h265 = 12, // 国内扩展
+
+    // 增强型rtmp FourCC
+    fourcc_vp9 = MKBETAG('v', 'p', '0', '9'),
+    fourcc_av1 = MKBETAG('a', 'v', '0', '1'),
+    fourcc_hevc = MKBETAG('h', 'v', 'c', '1')
+};
+
+// UI8;
+enum class RtmpH264PacketType : uint8_t {
+    h264_config_header = 0, // AVC or HEVC sequence header(sps/pps)
+    h264_nalu = 1, // AVC or HEVC NALU
+    h264_end_seq = 2, // AVC or HEVC end of sequence (lower level NALU sequence ender is not REQUIRED or supported)
+};
+
+// https://github.com/veovera/enhanced-rtmp/blob/main/enhanced-rtmp.pdf
+// UB[4]
+enum class RtmpPacketType : uint8_t {
+    PacketTypeSequenceStart = 0,
+    PacketTypeCodedFrames = 1,
+    PacketTypeSequenceEnd = 2,
+
+    // CompositionTime Offset is implied to equal zero. This is
+    // an optimization to save putting SI24 composition time value of zero on
+    // the wire. See pseudo code below in the VideoTagBody section
+    PacketTypeCodedFramesX = 3,
+
+    // VideoTagBody does not contain video data. VideoTagBody
+    // instead contains an AMF encoded metadata. See Metadata Frame
+    // section for an illustration of its usage. As an example, the metadata
+    // can be HDR information. This is a good way to signal HDR
+    // information. This also opens up future ways to express additional
+    // metadata that is meant for the next video sequence.
+    //
+    // note: presence of PacketTypeMetadata means that FrameType
+    // flags at the top of this table should be ignored
+    PacketTypeMetadata = 4,
+
+    // Carriage of bitstream in MPEG-2 TS format
+    // note: PacketTypeSequenceStart and PacketTypeMPEG2TSSequenceStart
+    // are mutually exclusive
+    PacketTypeMPEG2TSSequenceStart = 5,
+};
+
+////////////////// rtmp audio //////////////////////////
+//https://rtmp.veriskope.com/pdf/video_file_format_spec_v10_1.pdf
+
+// UB [4]; Format of SoundData
+enum class RtmpAudioCodec : uint8_t {
+    /**
+    0 = Linear PCM, platform endian
+    1 = ADPCM
+    2 = MP3
+    3 = Linear PCM, little endian
+    4 = Nellymoser 16 kHz mono
+    5 = Nellymoser 8 kHz mono
+    6 = Nellymoser
+    7 = G.711 A-law logarithmic PCM
+    8 = G.711 mu-law logarithmic PCM
+    9 = reserved
+    10 = AAC
+    11 = Speex
+    14 = MP3 8 kHz
+    15 = Device-specific sound
+     */
+    g711a = 7,
+    g711u = 8,
+    aac = 10,
+    opus = 13 // 国内扩展
+};
+
+// UI8;
+enum class RtmpAACPacketType : uint8_t {
+    aac_config_header = 0, // AAC sequence header
+    aac_raw = 1, // AAC raw
+};
+
+////////////////////////////////////////////
+
+struct RtmpPacketInfo {
+    CodecId codec = CodecInvalid;
+    bool is_enhanced;
+    union {
+        struct {
+            RtmpFrameType frame_type;
+            RtmpPacketType pkt_type;   // enhanced = true
+            RtmpH264PacketType h264_pkt_type; // enhanced = false
+        } video;
+    };
+};
+// https://github.com/veovera/enhanced-rtmp
+CodecId parseVideoRtmpPacket(const uint8_t *data, size_t size, RtmpPacketInfo *info = nullptr);
 
 }//namespace mediakit
 #endif//__rtmp_h

@@ -14,7 +14,7 @@
 #include "HttpBody.h"
 #include "HttpCookie.h"
 #include "Common/Parser.h"
-#include "Network/TcpSession.h"
+#include "Network/Session.h"
 #include "Util/function_traits.h"
 
 namespace mediakit {
@@ -24,8 +24,8 @@ public:
     typedef std::function<void(int code, const StrCaseMap &headerOut, const HttpBody::Ptr &body)> HttpResponseInvokerLambda0;
     typedef std::function<void(int code, const StrCaseMap &headerOut, const std::string &body)> HttpResponseInvokerLambda1;
 
-    HttpResponseInvokerImp(){}
-    ~HttpResponseInvokerImp(){}
+    HttpResponseInvokerImp() = default;
+    ~HttpResponseInvokerImp() = default;
     template<typename C>
     HttpResponseInvokerImp(const C &c):HttpResponseInvokerImp(typename toolkit::function_traits<C>::stl_function_type(c)) {}
     HttpResponseInvokerImp(const HttpResponseInvokerLambda0 &lambda);
@@ -54,7 +54,7 @@ public:
      * @param parser http请求
      * @param cb 回调对象
     */
-    static void onAccessPath(toolkit::TcpSession &sender, Parser &parser, const invoker &cb);
+    static void onAccessPath(toolkit::Session &sender, Parser &parser, const invoker &cb);
 
     /**
      * 获取mime值
@@ -62,6 +62,13 @@ public:
      * @return mime值
      */
     static const std::string &getContentType(const char *name);
+
+    /**
+     * 该ip是否再白名单中
+     * @param ip 支持ipv4和ipv6
+     */
+    static bool isIPAllowed(const std::string &ip);
+
 private:
     HttpFileManager() = delete;
     ~HttpFileManager() = delete;
